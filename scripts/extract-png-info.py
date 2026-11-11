@@ -38,7 +38,7 @@ def format_params_a1111(d: dict) -> str:
     parts.append(f"Size: {d.get('width', 'N/A')}x{d.get('height', 'N/A')}")
     if lora_list := d.get("loras"):
         if lora_list:
-            lines = [f"{l.get('name', '?')}: {l.get('weight', 0.8)}" for l in lora_list]
+            lines = [f"{lora.get('name', '?')}: {lora.get('weight', 0.8)}" for lora in lora_list]
             parts.append("LoRAs: " + ", ".join(lines))
     return "\n".join(parts)
 
@@ -73,21 +73,16 @@ def extract_from_png(path: Path) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Extract logo generation metadata from PNGs"
-    )
+    parser = argparse.ArgumentParser(description="Extract logo generation metadata from PNGs")
     parser.add_argument("file", help="Path to PNG output file")
     parser.add_argument(
-        "--format", "-f",
+        "--format",
+        "-f",
         choices=["logo", "comfyui", "a1111", "all"],
         default="logo",
-        help="Output format (default: logo)"
+        help="Output format (default: logo)",
     )
-    parser.add_argument(
-        "--raw", "-r",
-        action="store_true",
-        help="Include raw PNG text keys found"
-    )
+    parser.add_argument("--raw", "-r", action="store_true", help="Include raw PNG text keys found")
     args = parser.parse_args()
 
     path = Path(args.file)

@@ -58,7 +58,7 @@ stacks run above it and produce the best results.
 
 ## Requirements
 
-- **Python 3.10+**
+- **Python 3.11+**
 - **A running ComfyUI instance** with the nodes your workflows use
   (`UnetLoaderGGUF` and the IP-Adapter nodes, for the shipped templates)
 - **`nvidia-smi`** on `PATH` for the VRAM tools (NVIDIA drivers)

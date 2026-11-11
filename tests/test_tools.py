@@ -53,7 +53,8 @@ class TestWorkflowPath(unittest.TestCase):
     def test_no_hardcoded_absolute_paths_remain(self):
         with open(os.path.abspath(srv.__file__)) as fh:
             src = fh.read()
-        self.assertNotIn("/home/guan/", src, "an absolute path leaked back into server.py")
+        for root in ("/home/", "/Users/", "C:\\Users\\"):
+            self.assertNotIn(root, src, f"an absolute path ({root}) leaked back into server.py")
 
 
 class TestNvidiaSmi(unittest.TestCase):
@@ -186,7 +187,7 @@ class TestSystemToolsNoTorch(unittest.TestCase):
     @patch.object(srv, "_nvidia_smi", side_effect=[8192, 4096, 4096])
     @patch("subprocess.run")
     def test_system_check_reports_driver_values(self, mock_run, _smi):
-        mock_run.return_value = MagicMock(returncode=0, stdout="RTX 4060, 560.35\n")
+        mock_run.return_value = MagicMock(returncode=0, stdout="Test GPU, 999.99\n")
         out = srv.system_check()
         self.assertTrue(out["cuda_available"])
         self.assertEqual(out["vram_total_mb"], 8192)
@@ -430,7 +431,11 @@ class TestVersionSingleSource(unittest.TestCase):
         """The MCP server identity must not carry its own version literal."""
         with open(os.path.abspath(srv.__file__)) as fh:
             src = fh.read()
-        self.assertNotIn('FastMCP("comfyui-logo-server")', src, "server still advertises the old project name")
+        # Assert the CURRENT identity positively rather than asserting an old
+        # one is absent: a positive check cannot silently pass because a name
+        # was spelled differently, and it keeps a retired name out of a public
+        # tree.
+        self.assertIn('FastMCP("comfyui-mcp-server")', src, "server does not advertise the package name")
 
 
 class TestNoSilentNameErrors(unittest.TestCase):

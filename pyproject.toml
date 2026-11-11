@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Agentic ComfyUI image generation over the Model Context Protocol: batch discovery, LoRA shaping, and provenance."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
   { name = "David Newman", email = "david@retiform.dev" },
   { name = "Guan", email = "guan@retiform.dev" },
@@ -19,9 +19,9 @@ classifiers = [
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Multimedia :: Graphics",
 ]
 
@@ -32,7 +32,13 @@ dependencies = [
   "mcp>=1.27.0,<2",
   "requests>=2.31.0",
   "psutil>=5.9.0",
-  "Pillow>=10.0.0",
+  # Pillow is pinned to 13 because everything below it carries advisories in the
+  # image decoders, which is the surface this package actually touches: it calls
+  # Image.open() on files handed to it by a client. 13.0.0 ships cp311 wheels
+  # only, which is why requires-python is >=3.11 -- Python 3.10 reached
+  # end-of-life on 2026-10-01, so the floor is not costing anyone a supported
+  # interpreter.
+  "Pillow>=13.0.0",
 ]
 
 [project.optional-dependencies]
@@ -89,6 +95,6 @@ ignore = [
 "tests/*.py" = ["E402"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_unused_ignores = true
 ignore_missing_imports = true

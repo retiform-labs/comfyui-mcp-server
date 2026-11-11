@@ -7,15 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.0.0] - 2026-11-10
 
-First release under the `comfyui-mcp-server` name. Rebuilt from the private
-`comfyui-logo-stack` working repo, which remains the historical record. This is
-a **major** bump because the package name, distribution name, module path and
+First release under the `comfyui-mcp-server` name, rebuilt from an earlier
+internal working repository that remains the historical record. This is a
+**major** bump because the package name, distribution name, module path and
 several tool contracts changed.
 
 ### Changed
 
 - **Package renamed** from the internal working name to `comfyui-mcp-server`,
   with the module at `comfyui_mcp_server` and a `src/` layout.
+- **Requires Python 3.11+**, raised from 3.10. This is forced by the Pillow pin
+  below rather than chosen: Pillow 13 ships cp311 wheels and no 3.10 build. The
+  cost is nil because 3.10 reached end-of-life on 2026-10-01, five weeks before
+  this release.
+- **Pillow floor raised to 13.0.0.** `pip-audit` reported 59 advisories against
+  Pillow 12.3.0, five of them critical; the package's only Pillow call is
+  `Image.open()` on files supplied by a client, which is exactly the decoder
+  surface those advisories describe. The audit is now clean.
 - **`_parse_param` de-duplicated.** It was defined twice, byte-identical, at
   roughly 40 lines each. Now a single definition.
 - **`.gitignore` rewritten.** The previous file used an inline comment on a
