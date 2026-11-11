@@ -4,17 +4,15 @@ Implements A1111-compatible tEXt chunk format for storing generation
 parameters in output PNGs. Also supports reading metadata back out.
 """
 
-import os
 import json
-from typing import Dict, Any, Optional, List
+import os
 from datetime import datetime, timezone
+from typing import Any
+
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
-try:
-    from .logger import log_info, log_warning, log_error
-except ImportError:  # executed as a flat script, not as a package
-    from logger import log_info, log_warning, log_error
+from .logger import log_error, log_info, log_warning
 
 # A1111-compatible parameter keys
 META_PARAMETERS = "parameters"
@@ -32,7 +30,14 @@ META_TIMESTAMP = "timestamp"
 META_GENERATOR = "generator"
 
 META_INFO_KEY = "LogoGenInfo"
-META_GENERATOR_VALUE = "comfyui-logo-mcp/1.2"
+try:
+    from . import __version__ as _PKG_VERSION
+except ImportError:  # executed as a flat script
+    _PKG_VERSION = "0.0.0"
+
+# Provenance string written into every image. Derived, never a literal: a
+# hardcoded version here silently mislabels every render after the first bump.
+META_GENERATOR_VALUE = f"comfyui-mcp-server/{_PKG_VERSION}"
 
 
 def _sanitize_for_tex(text: str) -> str:
@@ -41,9 +46,9 @@ def _sanitize_for_tex(text: str) -> str:
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
-def build_a1111_text(params: Dict[str, Any]) -> str:
+def build_a1111_text(params: dict[str, Any]) -> str:
     """Build A1111-style parameters text block from a params dict.
-    
+
     Accepts both LogoGenInfo-style keys (positive_prompt, negative_prompt, cfg_scale)
     and legacy short keys (positive, negative, cfg).
     """
@@ -76,12 +81,12 @@ def build_a1111_text(params: Dict[str, Any]) -> str:
     return _sanitize_for_tex("\n".join(lines))
 
 
-def embed_metadata(filepath: str, params: Dict[str, Any], overwrite: bool = False) -> bool:
+def embed_metadata(filepath: str, params: dict[str, Any], overwrite: bool = False) -> bool:
     """Embed generation parameters into a PNG file as A1111-compatible tEXt chunks."""
     if not os.path.isfile(filepath):
         log_error(f"File not found: {filepath}", tool_name="png_metadata")
         return False
-    
+
     try:
         img = Image.open(filepath)
         if img.format != "PNG":
@@ -90,14 +95,14 @@ def embed_metadata(filepath: str, params: Dict[str, Any], overwrite: bool = Fals
     except Exception as e:
         log_error(f"Open failed ({filepath}): {e}", tool_name="png_metadata")
         return False
-    
+
     # Build metadata
     pnginfo = PngInfo()
-    
+
     # A1111 main params block
     a1111_text = build_a1111_text(params)
     pnginfo.add_text(META_PARAMETERS, a1111_text)
-    
+
     # Supplemental structured metadata
     structured = {
         "positive_prompt": params.get("positive_prompt", params.get("positive", "")),
@@ -115,12 +120,12 @@ def embed_metadata(filepath: str, params: Dict[str, Any], overwrite: bool = Fals
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "generator": params.get("generator", META_GENERATOR_VALUE),
     }
-    
+
     try:
         pnginfo.add_text(META_INFO_KEY, _sanitize_for_tex(json.dumps(structured, indent=None)))
     except Exception as e:
         log_warning(f"Structured metadata failed: {e}", tool_name="png_metadata")
-    
+
     # Save with metadata
     try:
         output_path = filepath if overwrite else filepath + ".tmp"
@@ -136,12 +141,12 @@ def embed_metadata(filepath: str, params: Dict[str, Any], overwrite: bool = Fals
         return False
 
 
-def extract_metadata(filepath: str) -> Dict[str, Any]:
+def extract_metadata(filepath: str) -> dict[str, Any]:
     """Extract generation parameters from a PNG's tEXt chunks."""
     if not os.path.isfile(filepath):
         log_error(f"File not found: {filepath}", tool_name="png_metadata")
         return {}
-    
+
     try:
         img = Image.open(filepath)
         if img.format != "PNG":
@@ -150,9 +155,9 @@ def extract_metadata(filepath: str) -> Dict[str, Any]:
     except Exception as e:
         log_error(f"Open failed ({filepath}): {e}", tool_name="png_metadata")
         return {}
-    
+
     metadata = dict(img.info) if img.info else {}
-    
+
     result = {
         "filepath": filepath,
         "filename": os.path.basename(filepath),
@@ -162,14 +167,14 @@ def extract_metadata(filepath: str) -> Dict[str, Any]:
         "structured": {},
         "rawkeys": list(metadata.keys()),
     }
-    
+
     if META_INFO_KEY in metadata:
         try:
             result["structured"] = json.loads(metadata[META_INFO_KEY])
         except json.JSONDecodeError:
             log_warning(f"Invalid structured metadata in {filepath}", tool_name="png_metadata")
             result["structured"] = {"raw": metadata[META_INFO_KEY]}
-    
+
     # Also try to parse A1111 parameters text into structured form
     if META_PARAMETERS in metadata and not result["structured"]:
         a1111_text = metadata[META_PARAMETERS]
@@ -179,25 +184,25 @@ def extract_metadata(filepath: str) -> Dict[str, Any]:
         if len(lines) > 1 and lines[1].startswith("Negative prompt:"):
             result["structured"]["negative_prompt"] = lines[1].split(": ", 1)[1] if ": " in lines[1] else ""
         # Steps, sampler, etc. from line 2 are harder to parse reliably
-    
+
     log_info(f"Metadata extracted: {os.path.basename(filepath)} (keys: {len(metadata)})", tool_name="png_metadata")
     return result
 
 
-def annotate_outputs(output_dir: str, params: Dict[str, Any], pattern: str = "logo_output*") -> List[str]:
+def annotate_outputs(output_dir: str, params: dict[str, Any], pattern: str = "logo_output*") -> list[str]:
     """Find matching PNGs in a directory and embed metadata in each."""
     import fnmatch
-    
-    annotated = []
+
+    annotated: list[str] = []
     if not os.path.isdir(output_dir):
         log_error(f"Output directory missing: {output_dir}", tool_name="png_metadata")
         return annotated
-    
+
     for filename in sorted(os.listdir(output_dir)):
         if fnmatch.fnmatch(filename, pattern) and filename.lower().endswith(".png"):
             filepath = os.path.join(output_dir, filename)
             if embed_metadata(filepath, params, overwrite=True):
                 annotated.append(filename)
-    
+
     log_info(f"Annotated {len(annotated)} files in {output_dir}", tool_name="png_metadata")
     return annotated

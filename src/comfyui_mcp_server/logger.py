@@ -1,4 +1,4 @@
-"""Structured logging for ComfyUI Logo MCP Server.
+"""Structured logging for ComfyUI MCP Server.
 
 Provides consistent log output across all tools with timestamps,
 level indicators, and tool context. No external dependencies.
@@ -6,14 +6,12 @@ level indicators, and tool context. No external dependencies.
 
 import logging
 import sys
-from datetime import datetime
-from typing import Optional
 
 # Configure default logger
-_logger: Optional[logging.Logger] = None
+_logger: logging.Logger | None = None
 
 
-def get_logger(name: str = "comfyui-logo") -> logging.Logger:
+def get_logger(name: str = "comfyui-mcp-server") -> logging.Logger:
     """Get or create the configured logger singleton."""
     global _logger
     if _logger is None:

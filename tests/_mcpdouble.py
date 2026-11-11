@@ -8,15 +8,64 @@ pass-through -- the decorator returns the original function.
 Import this BEFORE importing the server module, in every test file: the server
 module is cached on first import, so whichever mock is installed first wins.
 """
+
 import sys
 import types
 
+# Parameters the REAL FastMCP accepts at mcp 1.x. Kept here so the double is
+# not more permissive than the thing it stands in for: a double that accepts
+# anything lets a TypeError-at-import ship green. This list was read from
+# inspect.signature(FastMCP.__init__) on mcp 1.27.0 -- re-read it before
+# trusting it against a different major.
+_REAL_FASTMCP_PARAMS = frozenset(
+    {
+        "name",
+        "instructions",
+        "website_url",
+        "icons",
+        "auth_server_provider",
+        "token_verifier",
+        "event_store",
+        "retry_interval",
+        "tools",
+        "debug",
+        "log_level",
+        "host",
+        "port",
+        "mount_path",
+        "sse_path",
+        "message_path",
+        "streamable_http_path",
+        "json_response",
+        "stateless_http",
+        "warn_on_duplicate_resources",
+        "warn_on_duplicate_tools",
+        "warn_on_duplicate_prompts",
+        "dependencies",
+        "lifespan",
+        "auth",
+        "transport_security",
+    }
+)
+
 
 class PassthroughFastMCP:
-    """Records registered tool names and returns functions unchanged."""
+    """Records registered tool names and returns functions unchanged.
 
-    def __init__(self, *_args, **_kwargs):
+    Rejects unknown keyword arguments the same way the real SDK does, so a
+    bad constructor call fails here instead of only in production.
+    """
+
+    def __init__(self, *args, **kwargs):
+        unexpected = set(kwargs) - _REAL_FASTMCP_PARAMS
+        if unexpected:
+            raise TypeError(f"FastMCP.__init__() got an unexpected keyword argument {sorted(unexpected)[0]!r}")
         self.tools = []
+        # The server sets `mcp._mcp_server.version` after construction, because
+        # FastMCP never forwards a version to the low-level server and the
+        # handshake would otherwise advertise the SDK's own. The double must
+        # expose the same attribute or the real call site breaks under test.
+        self._mcp_server = types.SimpleNamespace(version=None)
 
     def tool(self, *dargs, **dkwargs):
         def _wrap(fn):

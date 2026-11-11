@@ -5,20 +5,22 @@ Covers:
 - _resolve_param: scalar, range, choice pool, "random", "random_unsafe"
 - _resolve_lora_config: fixed mode, auto mode (with mocked available LoRAs)
 """
-import unittest
-from unittest.mock import patch, MagicMock
-import sys
+
 import os
+import sys
+import unittest
+from unittest.mock import patch
 
 # Install the shared pass-through MCP double BEFORE importing the server.
 sys.path.insert(0, os.path.dirname(__file__))
 from _mcpdouble import install as _install_mcp
+
 _install_mcp()
 
 # Ensure the src/ layout package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from comfyui_mcp_server.server import _resolve_param, _resolve_lora_config
+from comfyui_mcp_server.server import _resolve_lora_config, _resolve_param
 
 
 class TestResolveParam(unittest.TestCase):
@@ -67,57 +69,104 @@ class TestResolveParam(unittest.TestCase):
         self.assertIn(result, pool)
 
     def test_random_sampler_safe(self):
-        """"random" for sampler: from safe pool"""
+        """ "random" for sampler: from safe pool"""
         result = _resolve_param("random", "sampler")
         # Safe pool samplers (22 total)
         safe_pool = [
-            "euler", "euler_ancestral",
-            "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu",
-            "dpmpp_3m_sde", "dpmpp_3m_sde_gpu",
-            "dpmpp_2m_cfg_pp", "dpmpp_2m_sde_heun", "dpmpp_2m_sde_heun_gpu",
-            "heun", "heunpp2",
-            "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp",
-            "dpmpp_sde", "dpmpp_sde_gpu",
-            "dpm_2", "dpm_2_ancestral", "lms", "dpm_fast", "dpm_adaptive",
-            "uni_pc", "uni_pc_bh2", "ddim"
+            "euler",
+            "euler_ancestral",
+            "dpmpp_2m",
+            "dpmpp_2m_sde",
+            "dpmpp_2m_sde_gpu",
+            "dpmpp_3m_sde",
+            "dpmpp_3m_sde_gpu",
+            "dpmpp_2m_cfg_pp",
+            "dpmpp_2m_sde_heun",
+            "dpmpp_2m_sde_heun_gpu",
+            "heun",
+            "heunpp2",
+            "dpmpp_2s_ancestral",
+            "dpmpp_2s_ancestral_cfg_pp",
+            "dpmpp_sde",
+            "dpmpp_sde_gpu",
+            "dpm_2",
+            "dpm_2_ancestral",
+            "lms",
+            "dpm_fast",
+            "dpm_adaptive",
+            "uni_pc",
+            "uni_pc_bh2",
+            "ddim",
         ]
         self.assertIn(result, safe_pool)
 
     def test_random_unsafe_sampler_all_pool(self):
-        """"random_unsafe" for sampler: includes unsafe samplers"""
+        """ "random_unsafe" for sampler: includes unsafe samplers"""
         result = _resolve_param("random_unsafe", "sampler")
         all_pool = [
-            "euler", "euler_ancestral",
-            "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu",
-            "dpmpp_3m_sde", "dpmpp_3m_sde_gpu",
-            "dpmpp_2m_cfg_pp", "dpmpp_2m_sde_heun", "dpmpp_2m_sde_heun_gpu",
-            "heun", "heunpp2",
-            "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp",
-            "dpmpp_sde", "dpmpp_sde_gpu",
-            "dpm_2", "dpm_2_ancestral", "lms", "dpm_fast", "dpm_adaptive",
-            "uni_pc", "uni_pc_bh2", "ddim",
-            "lcm", "ddpm",
-            "gradient_estimation", "gradient_estimation_cfg_pp",
-            "seeds_2", "seeds_3",
-            "sa_solver", "sa_solver_pece",
-            "exp_heun_2_x0", "exp_heun_2_x0_sde", "er_sde",
-            "ipndm", "ipndm_v", "deis",
-            "res_multistep", "res_multistep_cfg_pp",
-            "res_multistep_ancestral", "res_multistep_ancestral_cfg_pp"
+            "euler",
+            "euler_ancestral",
+            "dpmpp_2m",
+            "dpmpp_2m_sde",
+            "dpmpp_2m_sde_gpu",
+            "dpmpp_3m_sde",
+            "dpmpp_3m_sde_gpu",
+            "dpmpp_2m_cfg_pp",
+            "dpmpp_2m_sde_heun",
+            "dpmpp_2m_sde_heun_gpu",
+            "heun",
+            "heunpp2",
+            "dpmpp_2s_ancestral",
+            "dpmpp_2s_ancestral_cfg_pp",
+            "dpmpp_sde",
+            "dpmpp_sde_gpu",
+            "dpm_2",
+            "dpm_2_ancestral",
+            "lms",
+            "dpm_fast",
+            "dpm_adaptive",
+            "uni_pc",
+            "uni_pc_bh2",
+            "ddim",
+            "lcm",
+            "ddpm",
+            "gradient_estimation",
+            "gradient_estimation_cfg_pp",
+            "seeds_2",
+            "seeds_3",
+            "sa_solver",
+            "sa_solver_pece",
+            "exp_heun_2_x0",
+            "exp_heun_2_x0_sde",
+            "er_sde",
+            "ipndm",
+            "ipndm_v",
+            "deis",
+            "res_multistep",
+            "res_multistep_cfg_pp",
+            "res_multistep_ancestral",
+            "res_multistep_ancestral_cfg_pp",
         ]
         self.assertIn(result, all_pool)
 
     def test_random_scheduler(self):
-        """"random" for scheduler: from all schedulers"""
+        """ "random" for scheduler: from all schedulers"""
         result = _resolve_param("random", "scheduler")
         schedulers = [
-            "simple", "sgm_uniform", "karras", "exponential",
-            "ddim_uniform", "beta", "normal", "linear_quadratic", "kl_optimal"
+            "simple",
+            "sgm_uniform",
+            "karras",
+            "exponential",
+            "ddim_uniform",
+            "beta",
+            "normal",
+            "linear_quadratic",
+            "kl_optimal",
         ]
         self.assertIn(result, schedulers)
 
     def test_random_seed_returns_int(self):
-        """"random" for seed: returns 32-bit int"""
+        """ "random" for seed: returns 32-bit int"""
         result = _resolve_param("random", "seed")
         self.assertIsInstance(result, int)
         self.assertGreaterEqual(result, 0)
@@ -139,7 +188,7 @@ class TestResolveParam(unittest.TestCase):
         self.assertEqual(_resolve_param(spec, "loras"), spec)
 
     def test_random_unsafe_for_other_params(self):
-        """"random_unsafe" for unsupported params: returned as-is"""
+        """ "random_unsafe" for unsupported params: returned as-is"""
         self.assertEqual(_resolve_param("random_unsafe", "steps"), "random_unsafe")
 
 
@@ -161,10 +210,7 @@ class TestResolveLoraConfig(unittest.TestCase):
 
     def test_fixed_single_scalar_weight(self):
         """Fixed mode with scalar weight"""
-        spec = {
-            "mode": "fixed",
-            "loras": [{"name": "v1", "weight": 0.85}]
-        }
+        spec = {"mode": "fixed", "loras": [{"name": "v1", "weight": 0.85}]}
         result = _resolve_lora_config(spec)
         self.assertIsNotNone(result)
         self.assertEqual(len(result), 1)
@@ -173,10 +219,7 @@ class TestResolveLoraConfig(unittest.TestCase):
 
     def test_fixed_single_range_weight(self):
         """Fixed mode with [min, max] weight: random uniform"""
-        spec = {
-            "mode": "fixed",
-            "loras": [{"name": "v1", "weight": [0.3, 1.2]}]
-        }
+        spec = {"mode": "fixed", "loras": [{"name": "v1", "weight": [0.3, 1.2]}]}
         result = _resolve_lora_config(spec)
         self.assertIsNotNone(result)
         self.assertEqual(len(result), 1)
@@ -192,7 +235,7 @@ class TestResolveLoraConfig(unittest.TestCase):
             "loras": [
                 {"name": "v1", "weight": 0.8},
                 {"name": "v2", "weight": [0.2, 0.9]},
-            ]
+            ],
         }
         result = _resolve_lora_config(spec)
         self.assertIsNotNone(result)
@@ -214,7 +257,7 @@ class TestResolveLoraConfig(unittest.TestCase):
             "loras": [
                 {"name": "v1", "weight": 0.8},
                 {"weight": 0.5},  # no name
-            ]
+            ],
         }
         result = _resolve_lora_config(spec)
         self.assertIsNotNone(result)
@@ -223,10 +266,7 @@ class TestResolveLoraConfig(unittest.TestCase):
 
     def test_fixed_default_weight(self):
         """Fixed mode: default weight 0.8 when not specified"""
-        spec = {
-            "mode": "fixed",
-            "loras": [{"name": "v1"}]
-        }
+        spec = {"mode": "fixed", "loras": [{"name": "v1"}]}
         result = _resolve_lora_config(spec)
         self.assertIsNotNone(result)
         self.assertAlmostEqual(result[0]["weight"], 0.8)
@@ -308,15 +348,30 @@ class TestIntegrationRoundTrip(unittest.TestCase):
     def test_sampler_random_bounds(self):
         """100 random samplers stay within declared pools"""
         safe_pool = [
-            "euler", "euler_ancestral",
-            "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu",
-            "dpmpp_3m_sde", "dpmpp_3m_sde_gpu",
-            "dpmpp_2m_cfg_pp", "dpmpp_2m_sde_heun", "dpmpp_2m_sde_heun_gpu",
-            "heun", "heunpp2",
-            "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp",
-            "dpmpp_sde", "dpmpp_sde_gpu",
-            "dpm_2", "dpm_2_ancestral", "lms", "dpm_fast", "dpm_adaptive",
-            "uni_pc", "uni_pc_bh2", "ddim"
+            "euler",
+            "euler_ancestral",
+            "dpmpp_2m",
+            "dpmpp_2m_sde",
+            "dpmpp_2m_sde_gpu",
+            "dpmpp_3m_sde",
+            "dpmpp_3m_sde_gpu",
+            "dpmpp_2m_cfg_pp",
+            "dpmpp_2m_sde_heun",
+            "dpmpp_2m_sde_heun_gpu",
+            "heun",
+            "heunpp2",
+            "dpmpp_2s_ancestral",
+            "dpmpp_2s_ancestral_cfg_pp",
+            "dpmpp_sde",
+            "dpmpp_sde_gpu",
+            "dpm_2",
+            "dpm_2_ancestral",
+            "lms",
+            "dpm_fast",
+            "dpm_adaptive",
+            "uni_pc",
+            "uni_pc_bh2",
+            "ddim",
         ]
         for _ in range(100):
             result = _resolve_param("random", "sampler")

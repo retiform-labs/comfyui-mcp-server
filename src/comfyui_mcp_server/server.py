@@ -1,59 +1,58 @@
 #!/usr/bin/env python3
 """
-ComfyUI Logo MCP Server
-Phase 5 Implementation - Agentic Logo Workflow Stack
+ComfyUI MCP Server -- agentic image generation over the Model Context Protocol.
 
-Design Spec v2.0 Compliant
-11 MCP Tools for logo generation management
+Thirteen tools covering server lifecycle, single and batch generation, LoRA
+stack shaping, model management, and GPU telemetry.
+
+The MCP server is a separate process from ComfyUI and holds no CUDA tensors, so
+VRAM is read from the driver (nvidia-smi) and released through ComfyUI's own
+POST /free. torch is deliberately not a dependency.
 """
 
-import os
-import sys
-import json
 import ast
 import copy
-import secrets
-import time
-import subprocess
-import psutil
+import json
+import os
 import random
-import requests
-from typing import Optional, Dict, Any, List, Union, Tuple
+import secrets
+import subprocess
+import sys
+import time
 from datetime import datetime
+from typing import Any
+
+import psutil
+import requests
 
 # MCP SDK
 from mcp.server.fastmcp import FastMCP
 
-# Local modules. Imported relatively so the package works installed, from a
-# checkout, and when run as a script. A failure here is NOT survivable: running
-# with a silently-None logger degrades every tool's diagnostics without a word,
-# so it raises instead of warning.
-try:
-    from .logger import log_info, log_warning
-    from .png_metadata import embed_metadata
-except ImportError:  # executed as a flat script, not as a package
-    _MCP_DIR = os.path.dirname(os.path.abspath(__file__))
-    if _MCP_DIR not in sys.path:
-        sys.path.insert(0, _MCP_DIR)
-    from logger import log_info, log_warning
-    from png_metadata import embed_metadata
+# Local modules. Relative only: this package is entered through its console
+# script or `python -m`, never as a flat script, so the sys.path fallback that
+# used to sit here was unreachable code that also shadowed the names above
+# (mypy flagged it as no-redef ten times over). A failure here is NOT
+# survivable -- a silently-None logger degrades every tool's diagnostics
+# without a word -- so it raises instead of warning.
+from .logger import log_debug, log_error, log_info, log_warning
+from .png_metadata import embed_metadata
 
 # Persistent job params cache (survives process restarts via file backing)
 _JOB_PARAMS_CACHE_PATH = os.path.join(os.path.dirname(__file__), ".job_params_cache.json")
 
 
-def _load_job_params() -> Dict[str, Dict[str, Any]]:
+def _load_job_params() -> dict[str, dict[str, Any]]:
     """Load cached job params from disk."""
     if os.path.isfile(_JOB_PARAMS_CACHE_PATH):
         try:
-            with open(_JOB_PARAMS_CACHE_PATH, "r") as f:
+            with open(_JOB_PARAMS_CACHE_PATH) as f:
                 return json.load(f)
         except Exception:
             pass
     return {}
 
 
-def _save_job_params(cache: Dict[str, Dict[str, Any]]) -> None:
+def _save_job_params(cache: dict[str, dict[str, Any]]) -> None:
     """Persist job params to disk."""
     try:
         with open(_JOB_PARAMS_CACHE_PATH, "w") as f:
@@ -64,47 +63,54 @@ def _save_job_params(cache: Dict[str, Dict[str, Any]]) -> None:
 
 _JOB_PARAMS = _load_job_params()
 
-def _trace_workflow(workflow: Dict, label: str = "") -> None:
+
+def _trace_workflow(workflow: dict, label: str = "") -> None:
     """Debug helper: print key node connections to stderr. Persistent."""
-    prefix = f"[MCP-TRACE]"
+    prefix = "[MCP-TRACE]"
     if label:
         prefix += f" [{label}]"
-    print(f"{prefix} === WORKFLOW TRACE ===", file=sys.stderr)
-    print(f"{prefix} Total nodes: {len(workflow)}", file=sys.stderr)
-    
+    log_debug(f"{prefix} === WORKFLOW TRACE ===")
+    log_debug(f"{prefix} Total nodes: {len(workflow)}")
+
     for nid, node in workflow.items():
         if node.get("class_type") == "KSampler":
-            print(f"{prefix} KSampler({nid}): seed={node['inputs'].get('seed')}, cfg={node['inputs'].get('cfg')}, steps={node['inputs'].get('steps')}, sampler={node['inputs'].get('sampler_name')}, scheduler={node['inputs'].get('scheduler')}, model={node['inputs'].get('model')}", file=sys.stderr)
-    
+            log_debug(
+                f"{prefix} KSampler({nid}): seed={node['inputs'].get('seed')}, cfg={node['inputs'].get('cfg')}, steps={node['inputs'].get('steps')}, sampler={node['inputs'].get('sampler_name')}, scheduler={node['inputs'].get('scheduler')}, model={node['inputs'].get('model')}"
+            )
+
     for nid, node in workflow.items():
         if node.get("class_type") == "IPAdapterBatch":
             inp = node["inputs"]
-            print(f"{prefix} IPAdapterBatch({nid}): model={inp.get('model')}, image={inp.get('image')}, weight={inp.get('weight')}, weight_type={inp.get('weight_type')}", file=sys.stderr)
-    
+            log_debug(
+                f"{prefix} IPAdapterBatch({nid}): model={inp.get('model')}, image={inp.get('image')}, weight={inp.get('weight')}, weight_type={inp.get('weight_type')}"
+            )
+
     lora_nodes = [(nid, node) for nid, node in workflow.items() if node.get("class_type") == "LoraLoader"]
     for nid, node in sorted(lora_nodes, key=lambda x: int(x[0])):
         inp = node["inputs"]
-        print(f"{prefix} LoraLoader({nid}): name={inp.get('lora_name')}, model_in={inp.get('model')}, clip_in={inp.get('clip')}, strength={inp.get('strength_model')}", file=sys.stderr)
-    
+        log_debug(
+            f"{prefix} LoraLoader({nid}): name={inp.get('lora_name')}, model_in={inp.get('model')}, clip_in={inp.get('clip')}, strength={inp.get('strength_model')}"
+        )
+
     for nid, node in workflow.items():
         if node.get("class_type") == "LoadImage":
-            print(f"{prefix} LoadImage({nid}): image={node['inputs'].get('image')}", file=sys.stderr)
-    
+            log_debug(f"{prefix} LoadImage({nid}): image={node['inputs'].get('image')}")
+
     for nid, node in workflow.items():
         if node.get("class_type") == "CLIPTextEncode":
             text = node["inputs"].get("text", "MISSING")
             text_preview = repr(text[:60]) if isinstance(text, str) else str(text)
-            print(f"{prefix} CLIPTextEncode({nid}): text={text_preview}", file=sys.stderr)
-    
-    print(f"{prefix} === END TRACE ===", file=sys.stderr)
+            log_debug(f"{prefix} CLIPTextEncode({nid}): text={text_preview}")
+
+    log_debug(f"{prefix} === END TRACE ===")
 
 
-def _validate_model_chain(workflow: Dict) -> Tuple[bool, str]:
+def _validate_model_chain(workflow: dict) -> tuple[bool, str]:
     """Traverse model graph from KSampler backward to Base. Return (ok, error).
 
     Expected chain:
         KSampler → IPAdapterBatch → [LoraLoader...] → UnetLoaderGGUF (base)
-    
+
     Validates:
     - KSampler.model points to a valid node
     - No orphan nodes in the chain
@@ -140,7 +146,10 @@ def _validate_model_chain(workflow: Dict) -> Tuple[bool, str]:
 
         # Guard against utility nodes sneaking into model path
         if ctype in ("CLIPVisionLoader", "IPAdapterModelLoader"):
-            return False, f"Utility node {ctype}({current_id}) in model chain — expected IPAdapterBatch or LoraLoader. Chain: {' -> '.join(chain)}"
+            return (
+                False,
+                f"Utility node {ctype}({current_id}) in model chain — expected IPAdapterBatch or LoraLoader. Chain: {' -> '.join(chain)}",
+            )
 
         # Base model reached
         if ctype in ("UnetLoaderGGUF", "CheckpointLoaderSimple"):
@@ -168,7 +177,6 @@ def _validate_model_chain(workflow: Dict) -> Tuple[bool, str]:
     return False, f"Orphan reference: node {current_id} not found in workflow. Chain: {' -> '.join(chain)}"
 
 
-
 # Configuration
 # Every filesystem root is environment-driven. A published package must not
 # assume it lives on the machine it was developed on: hardcoded paths make
@@ -190,35 +198,79 @@ OUTPUT_PATH = os.environ.get("COMFYUI_OUTPUT_PATH", os.path.join(COMFYUI_PATH, "
 # CURATED SAMPLER POOLS (for randomized batch generation)
 # ============================================================================
 _SAFE_SAMPLERS = [
-    "euler", "euler_ancestral",
-    "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu",
-    "dpmpp_3m_sde", "dpmpp_3m_sde_gpu",
-    "dpmpp_2m_cfg_pp", "dpmpp_2m_sde_heun", "dpmpp_2m_sde_heun_gpu",
-    "heun", "heunpp2",
-    "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp",
-    "dpmpp_sde", "dpmpp_sde_gpu",
-    "dpm_2", "dpm_2_ancestral", "lms", "dpm_fast", "dpm_adaptive",
-    "uni_pc", "uni_pc_bh2", "ddim"
+    "euler",
+    "euler_ancestral",
+    "dpmpp_2m",
+    "dpmpp_2m_sde",
+    "dpmpp_2m_sde_gpu",
+    "dpmpp_3m_sde",
+    "dpmpp_3m_sde_gpu",
+    "dpmpp_2m_cfg_pp",
+    "dpmpp_2m_sde_heun",
+    "dpmpp_2m_sde_heun_gpu",
+    "heun",
+    "heunpp2",
+    "dpmpp_2s_ancestral",
+    "dpmpp_2s_ancestral_cfg_pp",
+    "dpmpp_sde",
+    "dpmpp_sde_gpu",
+    "dpm_2",
+    "dpm_2_ancestral",
+    "lms",
+    "dpm_fast",
+    "dpm_adaptive",
+    "uni_pc",
+    "uni_pc_bh2",
+    "ddim",
 ]
 
 _UNSAFE_SAMPLERS = [
-    "lcm", "ddpm",
-    "gradient_estimation", "gradient_estimation_cfg_pp",
-    "seeds_2", "seeds_3",
-    "sa_solver", "sa_solver_pece",
-    "exp_heun_2_x0", "exp_heun_2_x0_sde", "er_sde",
-    "ipndm", "ipndm_v", "deis",
-    "res_multistep", "res_multistep_cfg_pp",
-    "res_multistep_ancestral", "res_multistep_ancestral_cfg_pp"
+    "lcm",
+    "ddpm",
+    "gradient_estimation",
+    "gradient_estimation_cfg_pp",
+    "seeds_2",
+    "seeds_3",
+    "sa_solver",
+    "sa_solver_pece",
+    "exp_heun_2_x0",
+    "exp_heun_2_x0_sde",
+    "er_sde",
+    "ipndm",
+    "ipndm_v",
+    "deis",
+    "res_multistep",
+    "res_multistep_cfg_pp",
+    "res_multistep_ancestral",
+    "res_multistep_ancestral_cfg_pp",
 ]
 
 _ALL_SAMPLERS = _SAFE_SAMPLERS + _UNSAFE_SAMPLERS
 
 _ALL_SCHEDULERS = [
-    "simple", "sgm_uniform", "karras", "exponential",
-    "ddim_uniform", "beta", "normal", "linear_quadratic", "kl_optimal"
+    "simple",
+    "sgm_uniform",
+    "karras",
+    "exponential",
+    "ddim_uniform",
+    "beta",
+    "normal",
+    "linear_quadratic",
+    "kl_optimal",
 ]
-mcp = FastMCP("comfyui-logo-server")
+try:
+    from . import __version__ as _PKG_VERSION
+except ImportError:  # executed as a flat script
+    _PKG_VERSION = "0.0.0"
+
+# FastMCP's constructor takes no `version` argument in mcp 1.x -- passing one
+# raises TypeError at import, which no mock can catch (it shipped that way once).
+# But it never forwards a version to the low-level server either, so the
+# handshake advertises the SDK's own version instead of ours. Set it on the
+# inner server after construction: that is the object the initialize response
+# actually reads (lowlevel/server.py: `server_version=self.version or ...`).
+mcp = FastMCP("comfyui-mcp-server")
+mcp._mcp_server.version = _PKG_VERSION
 
 # ============================================================================
 # TOOL 1: system_check
@@ -228,8 +280,9 @@ IPADAPTER_CLIP_VISION_MODEL = "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
 IPADAPTER_PLUS_MODEL = "ip-adapter-plus_sdxl_vit-h.bin"
 IPADAPTER_BASIC_MODEL = "ip-adapter_sdxl_vit-h.bin"
 
+
 @mcp.tool()
-def system_check() -> Dict[str, Any]:
+def system_check() -> dict[str, Any]:
     """Verify system readiness: GPU, driver, VRAM.
 
     Reads the driver, not torch. This process never allocates CUDA tensors, so
@@ -241,10 +294,13 @@ def system_check() -> Dict[str, Any]:
     try:
         name_out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
-        gpu_name, driver = (name_out.stdout.strip().split(",") + ["", ""])[:2] \
-            if name_out.returncode == 0 else (None, None)
+        gpu_name, driver = (
+            (name_out.stdout.strip().split(",") + ["", ""])[:2] if name_out.returncode == 0 else (None, None)
+        )
         gpu_name = (gpu_name or "").strip() or None
         driver = (driver or "").strip() or None
     except (OSError, subprocess.SubprocessError):
@@ -263,11 +319,12 @@ def system_check() -> Dict[str, Any]:
         **({} if readable else {"error": "nvidia-smi unavailable or returned no data"}),
     }
 
+
 # ============================================================================
 # TOOL 2: start_comfyui
 # ============================================================================
 @mcp.tool()
-def start_comfyui(lowvram: bool = True, fp16: bool = True, port: int = 8188) -> Dict[str, Any]:
+def start_comfyui(lowvram: bool = True, fp16: bool = True, port: int = 8188) -> dict[str, Any]:
     """Launch ComfyUI with VRAM-optimized flags"""
     try:
         # Check if already running
@@ -277,9 +334,9 @@ def start_comfyui(lowvram: bool = True, fp16: bool = True, port: int = 8188) -> 
                 "success": True,
                 "pid": status.get("pid"),
                 "port": status.get("port"),
-                "message": "ComfyUI already running"
+                "message": "ComfyUI already running",
             }
-        
+
         # Build command
         cmd = [sys.executable, os.path.join(COMFYUI_PATH, "main.py"), "--port", str(port)]
         if lowvram:
@@ -288,45 +345,37 @@ def start_comfyui(lowvram: bool = True, fp16: bool = True, port: int = 8188) -> 
             cmd.append("--fp16-unet")
         cmd.append("--preview-method")
         cmd.append("auto")
-        
+
         # Launch process
         process = subprocess.Popen(
-            cmd,
-            cwd=COMFYUI_PATH,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
+            cmd, cwd=COMFYUI_PATH, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
         )
-        
+
         # Wait briefly and verify
         time.sleep(2)
         new_status = get_comfyui_status()
-        
+
         return {
             "success": new_status.get("running", False),
             "pid": process.pid,
             "port": port,
-            "message": "ComfyUI started" if new_status.get("running") else "Failed to start"
+            "message": "ComfyUI started" if new_status.get("running") else "Failed to start",
         }
     except Exception as e:
-        return {
-            "success": False,
-            "pid": None,
-            "port": None,
-            "message": f"Error: {str(e)}"
-        }
+        return {"success": False, "pid": None, "port": None, "message": f"Error: {str(e)}"}
+
 
 # ============================================================================
 # TOOL 3: stop_comfyui
 # ============================================================================
 @mcp.tool()
-def stop_comfyui(force: bool = False) -> Dict[str, Any]:
+def stop_comfyui(force: bool = False) -> dict[str, Any]:
     """Graceful shutdown of ComfyUI server"""
     try:
         status = get_comfyui_status()
         if not status.get("running"):
             return {"success": True, "message": "ComfyUI not running"}
-        
+
         pid = status.get("pid")
         if pid:
             process = psutil.Process(pid)
@@ -345,11 +394,12 @@ def stop_comfyui(force: bool = False) -> Dict[str, Any]:
     except Exception as e:
         return {"success": False, "message": f"Error: {str(e)}"}
 
+
 # ============================================================================
 # TOOL 4: get_comfyui_status
 # ============================================================================
 @mcp.tool()
-def get_comfyui_status() -> Dict[str, Any]:
+def get_comfyui_status() -> dict[str, Any]:
     """Check if ComfyUI is running"""
     try:
         # Try HTTP check first
@@ -362,39 +412,50 @@ def get_comfyui_status() -> Dict[str, Any]:
                 "port": COMFYUI_PORT,
                 "uptime_sec": data.get("system", {}).get("uptime"),
                 "comfyui_version": data.get("system", {}).get("comfyui_version"),
-                "pytorch_version": data.get("system", {}).get("pytorch_version")
+                "pytorch_version": data.get("system", {}).get("pytorch_version"),
             }
     except (requests.RequestException, ValueError, KeyError, TypeError):
         pass
-    
+
     # Fallback: check for python process running main.py
     try:
-        for proc in psutil.process_iter(['pid', 'cmdline']):
-            cmdline = proc.info.get('cmdline', [])
-            if cmdline and 'main.py' in str(cmdline):
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            cmdline = proc.info.get("cmdline", [])
+            if cmdline and "main.py" in str(cmdline):
                 return {
                     "running": True,
-                    "pid": proc.info['pid'],
+                    "pid": proc.info["pid"],
                     "port": COMFYUI_PORT,
                     "uptime_sec": None,
                     "comfyui_version": None,
-                    "pytorch_version": None
+                    "pytorch_version": None,
                 }
     except (requests.RequestException, ValueError, KeyError, TypeError):
         pass
-    
+
     return {
         "running": False,
         "pid": None,
         "port": None,
         "uptime_sec": None,
         "comfyui_version": None,
-        "pytorch_version": None
+        "pytorch_version": None,
     }
+
 
 # ============================================================================
 # TOOL 5: generate_logo - FIXED VERSION
 # ============================================================================
+def _generator_tag(variant: str = "") -> str:
+    """Provenance string stamped into generated images.
+
+    Derived from the package version so it cannot drift from what was actually
+    installed; the variant marks which code path produced the render.
+    """
+    suffix = f" ({variant})" if variant else ""
+    return f"comfyui-mcp-server/{_PKG_VERSION}{suffix}"
+
+
 def _workflow_path(filename: str) -> str:
     """Resolve a workflow template path relative to this package.
 
@@ -405,7 +466,7 @@ def _workflow_path(filename: str) -> str:
     return os.path.abspath(os.path.join(here, "workflows", filename))
 
 
-def _nvidia_smi(field: str) -> Optional[int]:
+def _nvidia_smi(field: str) -> int | None:
     """Query one numeric GPU field via nvidia-smi. None when unavailable.
 
     The MCP server runs in its own process and never allocates CUDA tensors, so
@@ -426,7 +487,7 @@ def _nvidia_smi(field: str) -> Optional[int]:
     return None
 
 
-def _free_comfyui_vram() -> Dict[str, Any]:
+def _free_comfyui_vram() -> dict[str, Any]:
     """Ask ComfyUI to unload models and release cached VRAM.
 
     ComfyUI owns the models. POST /free is its own endpoint and the only lever
@@ -443,7 +504,15 @@ def _free_comfyui_vram() -> Dict[str, Any]:
         error = None if ok else f"HTTP {response.status_code}"
     except requests.RequestException as exc:
         ok, error = False, str(exc)
-    after = _nvidia_smi("memory.used")
+    # ComfyUI unloads asynchronously: the endpoint returns 200 before the
+    # memory is actually released, so a synchronous re-read reports a false
+    # zero. Poll until the figure settles (or stops moving) before measuring.
+    after = before
+    if ok:
+        after = _poll_until_released(before, timeout=20.0)
+    else:
+        after = _nvidia_smi("memory.used")
+
     freed = (before - after) if (before is not None and after is not None) else None
     return {
         "success": ok,
@@ -452,6 +521,47 @@ def _free_comfyui_vram() -> Dict[str, Any]:
         "used_after_mb": after,
         "freed_mb": freed,
     }
+
+
+def _poll_until_released(
+    before: int | None, timeout: float = 25.0, settle_reads: int = 2, interval: float = 0.5
+) -> int | None:
+    """Wait for driver VRAM to actually drop, then for the drop to settle.
+
+    Two identical readings are NOT evidence of a finished release: before the
+    unload begins the figure is also unchanging, so a naive settle-check returns
+    immediately and reports a false zero. The discriminator has to be *a reading
+    below the starting figure* first, and only then a settled reading.
+
+    Returns the settled figure. If the release never starts, returns the last
+    observation -- never a fabricated reduction.
+    """
+    if before is None:
+        return _nvidia_smi("memory.used")
+
+    deadline = time.monotonic() + timeout
+    released = False
+    last = before
+    stable = 0
+
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        current = _nvidia_smi("memory.used")
+        if current is None:
+            return last
+
+        if current < before:
+            released = True
+
+        if released and current == last:
+            stable += 1
+            if stable >= settle_reads:
+                return current
+        else:
+            stable = 0
+        last = current
+
+    return last
 
 
 def _parse_param(val: Any) -> Any:
@@ -477,31 +587,32 @@ def _parse_param(val: Any) -> Any:
         if s.startswith("{") and s.endswith("}"):
             inner = s[1:-1].strip()
             import re
-            parts = re.split(r', (?=\w+(?:\w|\s)*=)', inner)
+
+            parts = re.split(r", (?=\w+(?:\w|\s)*=)", inner)
             result = {}
             for part in parts:
-                if '=' not in part:
+                if "=" not in part:
                     continue
-                key, v = part.split('=', 1)
+                key, v = part.split("=", 1)
                 key = key.strip()
                 v = v.strip()
                 if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
                     v = v[1:-1]
-                elif v.lower() in ('true', 'false'):
-                    v = v.lower() == 'true'
-                elif v.lower() in ('null', 'none'):
+                elif v.lower() in ("true", "false"):
+                    v = v.lower() == "true"
+                elif v.lower() in ("null", "none"):
                     v = None
-                elif v.startswith('[') and v.endswith(']'):
+                elif v.startswith("[") and v.endswith("]"):
                     try:
                         v = ast.literal_eval(v)
                     except Exception:
                         pass
-                elif v.startswith('{') and v.endswith('}'):
+                elif v.startswith("{") and v.endswith("}"):
                     iv = _parse_param(v)
                     v = iv if iv is not None else v
                 else:
                     try:
-                        if '.' in v or 'e' in v.lower():
+                        if "." in v or "e" in v.lower():
                             v = float(v)
                         else:
                             v = int(v)
@@ -511,7 +622,8 @@ def _parse_param(val: Any) -> Any:
             return result if result else None
     return None
 
-def _release_after_batch(keep_loaded: bool, job_count: int) -> Optional[Dict[str, Any]]:
+
+def _release_after_batch(keep_loaded: bool, job_count: int) -> dict[str, Any] | None:
     """Release ComfyUI's VRAM once a batch is finished.
 
     Mirrors the transcription pipeline's doctrine: release BETWEEN STAGES, not
@@ -602,6 +714,7 @@ def _resolve_param(spec: Any, param_name: str) -> Any:
     # Dict or other complex types: return as-is (handled by caller)
     return spec
 
+
 def _resolve_lora_config(spec: Any) -> Any:
     """Resolve LoRA randomization spec to concrete LoRA list.
 
@@ -662,9 +775,9 @@ def _resolve_lora_config(spec: Any) -> Any:
         # Build available LoRA pool, excluding any pinned names
         available = _get_available_loras()
         if pool != "all" and isinstance(pool, list):
-            available = [l for l in available if l in pool]
+            available = [name for name in available if name in pool]
         pinned_names = {p.get("name") for p in pinned if isinstance(p, dict) and p.get("name")}
-        available = [l for l in available if l not in pinned_names]
+        available = [name for name in available if name not in pinned_names]
 
         if count == 0 or not available:
             # Even with zero random picks, pinned LoRAs still apply.
@@ -686,91 +799,92 @@ def _resolve_lora_config(spec: Any) -> Any:
 
     return None
 
-def _inject_lora_nodes(workflow: Dict, loras: List[Dict[str, Union[str, float]]]) -> Dict:
+
+def _inject_lora_nodes(workflow: dict, loras: list[dict[str, str | float]]) -> dict:
     """Inject multiple chained LoraLoader nodes and reroute connections.
-    
+
     Chained flow with N LoRAs:
         Node 2 (UnetLoaderGGUF) -> LoRA1 -> LoRA2 -> ... -> LoRA_N -> Node 6 (KSampler)
         Node 1 (DualCLIPLoader) -> LoRA1 -> LoRA2 -> ... -> LoRA_N -> Nodes 4,5 (CLIPTextEncode)
-    
+
     Args:
         workflow: ComfyUI workflow dict
         loras: List of {"name": str, "weight": float} dicts, max 5 items
-        
+
     Returns:
         Modified workflow with chained LoraLoader nodes
-        
+
     Raises:
         ValueError: If loras list is empty or exceeds 5 items
     """
     MAX_LORAS = 5
-    
+
     if not loras:
         raise ValueError("loras list cannot be empty")
     if len(loras) > MAX_LORAS:
         raise ValueError(f"Maximum {MAX_LORAS} LoRAs supported, got {len(loras)}")
-    
+
     # Find the next available node ID
-    max_id = max(int(k) for k in workflow.keys() if k.isdigit())
-    
+    max_id = max(int(k) for k in workflow if k.isdigit())
+
     # Create LoraLoader nodes sequentially
     lora_node_ids = []
     for i, lora_config in enumerate(loras):
         lora_node_id = str(max_id + i + 1)
         lora_node_ids.append(lora_node_id)
-        
+
         # Determine inputs based on position in chain
         if i == 0:
             # First LoRA: inputs from base loaders (Node 1 and Node 2)
             model_input = ["2", 0]  # UnetLoaderGGUF MODEL output
-            clip_input = ["1", 0]   # DualCLIPLoader CLIP output
+            clip_input = ["1", 0]  # DualCLIPLoader CLIP output
         else:
             # Subsequent LoRAs: inputs from previous LoraLoader
             prev_node_id = lora_node_ids[i - 1]
             model_input = [prev_node_id, 0]  # Previous LoRA MODEL output
-            clip_input = [prev_node_id, 1]    # Previous LoRA CLIP output
-        
+            clip_input = [prev_node_id, 1]  # Previous LoRA CLIP output
+
         # Create LoraLoader node
         workflow[lora_node_id] = {
             "inputs": {
                 "model": model_input,
                 "clip": clip_input,
-                "lora_name": lora_config["name"],
+                "lora_name": str(lora_config["name"]),
                 "strength_model": lora_config.get("weight", 0.8),
-                "strength_clip": lora_config.get("weight", 0.8)
+                "strength_clip": lora_config.get("weight", 0.8),
             },
             "class_type": "LoraLoader",
-            "_meta": {"title": f"Load LoRA {i+1}: {lora_config['name'][:20]}"}
+            "_meta": {"title": f"Load LoRA {i + 1}: {str(lora_config['name'])[:20]}"},
         }
-    
+
     # Final LoRA node ID for downstream connections
     final_lora_id = lora_node_ids[-1]
-    
+
     # Update KSampler to use final LoraLoader model output [0] = MODEL
     for node_id, node in workflow.items():
         if node.get("class_type") == "KSampler":
             node["inputs"]["model"] = [final_lora_id, 0]
-    
+
     # Update CLIPTextEncode nodes to use final LoraLoader clip output [1] = CLIP
     for node_id, node in workflow.items():
         if node.get("class_type") == "CLIPTextEncode":
             node["inputs"]["clip"] = [final_lora_id, 1]
-    
+
     return workflow
 
 
 def _inject_ipadapter_nodes(
-    workflow: Dict,
-    ref_images: List[str],
+    workflow: dict,
+    ref_images: list[str],
     weight: float = 0.6,
     weight_type: str = "style transfer",
     start_at: float = 0.0,
     end_at: float = 1.0,
     embeds_scaling: str = "V only",
-    encode_batch_size: int = 0
-) -> Dict:
+    encode_batch_size: int = 0,
+) -> dict:
     """Inject IP-Adapter nodes for multi-image reference generation.
-    
+
     For 1 reference image: direct LoadImage -> IPAdapterBatch
     For 2+ references: LoadImages -> ImageBatch chain -> IPAdapterBatch
     """
@@ -778,28 +892,33 @@ def _inject_ipadapter_nodes(
         return workflow
     if len(ref_images) > 4:
         raise ValueError(f"Maximum 4 reference images supported, got {len(ref_images)}")
-    
+
     input_dir = os.path.join(COMFYUI_PATH, "input")
     for img_name in ref_images:
         if not os.path.isfile(os.path.join(input_dir, img_name)):
             raise FileNotFoundError(f"Reference image not found: {img_name}")
-    
+
     # Cleanup: remove orphaned template placeholder nodes
     nodes_to_remove = []
     for node_id, node in list(workflow.items()):
         class_type = node.get("class_type", "")
-        if class_type == "LoadImage" and node.get("inputs", {}).get("image") == "REFERENCE_IMAGE_PLACEHOLDER":
-            nodes_to_remove.append(node_id)
-        elif class_type in ("CLIPVisionLoader", "IPAdapterModelLoader", "IPAdapterBatch"):
+        if (
+            class_type == "LoadImage"
+            and node.get("inputs", {}).get("image") == "REFERENCE_IMAGE_PLACEHOLDER"
+            or class_type in ("CLIPVisionLoader", "IPAdapterModelLoader", "IPAdapterBatch")
+        ):
             nodes_to_remove.append(node_id)
     for node_id in nodes_to_remove:
         del workflow[node_id]
     if nodes_to_remove:
-        log_info(f"Removed {len(nodes_to_remove)} orphaned template nodes: {nodes_to_remove}", tool_name="_inject_ipadapter_nodes")
+        log_info(
+            f"Removed {len(nodes_to_remove)} orphaned template nodes: {nodes_to_remove}",
+            tool_name="_inject_ipadapter_nodes",
+        )
 
-    max_id = max(int(k) for k in workflow.keys() if k.isdigit())
+    max_id = max(int(k) for k in workflow if k.isdigit())
     next_id = max_id + 1
-    
+
     model_source = None
     for node_id, node in workflow.items():
         if node.get("class_type") == "LoraLoader":
@@ -807,7 +926,7 @@ def _inject_ipadapter_nodes(
                 model_source = [node_id, 0]
     if model_source is None:
         model_source = ["2", 0]
-    
+
     # Create LoadImage nodes for each reference
     load_image_ids = []
     for i, img_name in enumerate(ref_images):
@@ -816,14 +935,14 @@ def _inject_ipadapter_nodes(
         workflow[load_id] = {
             "inputs": {"image": img_name},
             "class_type": "LoadImage",
-            "_meta": {"title": f"Load Ref {i+1}: {img_name}"}
+            "_meta": {"title": f"Load Ref {i + 1}: {img_name}"},
         }
-    
+
     # Build ImageBatch chain for 2+ images
     if len(ref_images) == 1:
         image_output = [load_image_ids[0], 0]
     else:
-        batch_nodes = []
+        batch_nodes: list[str] = []
         img_idx = 0
         last_batch_id = None
         while img_idx < len(load_image_ids):
@@ -831,12 +950,9 @@ def _inject_ipadapter_nodes(
                 # ImageBatch 1: load_img[0] + load_img[1]
                 batch_id = str(next_id + len(load_image_ids) + len(batch_nodes))
                 workflow[batch_id] = {
-                    "inputs": {
-                        "image1": [load_image_ids[0], 0],
-                        "image2": [load_image_ids[1], 0]
-                    },
+                    "inputs": {"image1": [load_image_ids[0], 0], "image2": [load_image_ids[1], 0]},
                     "class_type": "ImageBatch",
-                    "_meta": {"title": "ImageBatch 1"}
+                    "_meta": {"title": "ImageBatch 1"},
                 }
                 batch_nodes.append(batch_id)
                 last_batch_id = batch_id
@@ -845,35 +961,32 @@ def _inject_ipadapter_nodes(
                 # Chain: last_batch + next_img
                 batch_id = str(next_id + len(load_image_ids) + len(batch_nodes))
                 workflow[batch_id] = {
-                    "inputs": {
-                        "image1": [last_batch_id, 0],
-                        "image2": [load_image_ids[img_idx], 0]
-                    },
+                    "inputs": {"image1": [last_batch_id, 0], "image2": [load_image_ids[img_idx], 0]},
                     "class_type": "ImageBatch",
-                    "_meta": {"title": f"ImageBatch {len(batch_nodes)+1}"}
+                    "_meta": {"title": f"ImageBatch {len(batch_nodes) + 1}"},
                 }
                 batch_nodes.append(batch_id)
                 last_batch_id = batch_id
                 img_idx += 1
         image_output = [last_batch_id, 0]
-    
+
     # CLIPVisionLoader
     offset = len(load_image_ids) + max(0, len(ref_images) - 1)
     clipvision_id = str(next_id + offset)
     workflow[clipvision_id] = {
         "inputs": {"clip_name": IPADAPTER_CLIP_VISION_MODEL},
         "class_type": "CLIPVisionLoader",
-        "_meta": {"title": "Load CLIP Vision (IP-Adapter)"}
+        "_meta": {"title": "Load CLIP Vision (IP-Adapter)"},
     }
-    
+
     # IPAdapterModelLoader
     ipadapter_loader_id = str(int(clipvision_id) + 1)
     workflow[ipadapter_loader_id] = {
         "inputs": {"ipadapter_file": IPADAPTER_PLUS_MODEL},
         "class_type": "IPAdapterModelLoader",
-        "_meta": {"title": "Load IPAdapter Model"}
+        "_meta": {"title": "Load IPAdapter Model"},
     }
-    
+
     # IPAdapterBatch node
     ipadapter_batch_id = str(int(ipadapter_loader_id) + 1)
     workflow[ipadapter_batch_id] = {
@@ -887,23 +1000,24 @@ def _inject_ipadapter_nodes(
             "end_at": end_at,
             "embeds_scaling": embeds_scaling,
             "encode_batch_size": encode_batch_size,
-            "clip_vision": [clipvision_id, 0]
+            "clip_vision": [clipvision_id, 0],
         },
         "class_type": "IPAdapterBatch",
-        "_meta": {"title": f"IPAdapter Batch ({len(ref_images)} refs)"}
+        "_meta": {"title": f"IPAdapter Batch ({len(ref_images)} refs)"},
     }
-    
+
     # Reroute KSampler to IPAdapterBatch output
     for node_id, node in workflow.items():
         if node.get("class_type") == "KSampler":
             node["inputs"]["model"] = [ipadapter_batch_id, 0]
-    
+
     # Reroute KSampler to IPAdapterBatch output
     for node_id, node in workflow.items():
         if node.get("class_type") == "KSampler":
             node["inputs"]["model"] = [ipadapter_batch_id, 0]
-    
+
     return workflow
+
 
 def _validate_lora(lora_name: str) -> bool:
     """Validate that a LoRA file exists in the loras directory."""
@@ -911,17 +1025,18 @@ def _validate_lora(lora_name: str) -> bool:
     return os.path.isfile(lora_path)
 
 
-def _get_available_loras() -> List[str]:
+def _get_available_loras() -> list[str]:
     """Get list of available LoRA filenames."""
     loras_dir = os.path.join(COMFYUI_PATH, "models", "loras")
     if not os.path.exists(loras_dir):
         return []
-    return [f for f in os.listdir(loras_dir) if f.endswith(('.safetensors', '.ckpt', '.pt'))]
+    return [f for f in os.listdir(loras_dir) if f.endswith((".safetensors", ".ckpt", ".pt"))]
+
 
 @mcp.tool()
 def generate_logo(
     prompt: str,
-    negative_embedding: Optional[str] = None,
+    negative_embedding: str | None = None,
     negative_prompt: str = "text, watermark, blurry, low quality",
     width: int = 1024,
     height: int = 1024,
@@ -929,32 +1044,31 @@ def generate_logo(
     cfg_scale: float = 7.0,
     sampler: str = "euler_ancestral",
     scheduler: str = "normal",
-    lora: Optional[str] = None,
+    lora: str | None = None,
     lora_weight: float = 0.8,
-    loras: Optional[List[Dict[str, Union[str, float]]]] = None,
-    seed: Optional[int] = None,
-    output_format: str = "png"
-) -> Dict[str, Any]:
+    loras: list[dict[str, str | float]] | None = None,
+    seed: int | None = None,
+    output_format: str = "png",
+) -> dict[str, Any]:
     """Submit async logo generation job"""
-    # DEBUG ENTRY: Log all received parameters
-    import sys
-    print(f"[MCP-DEBUG] === generate_logo called ===", file=sys.stderr)
-    print(f"[MCP-DEBUG] prompt: {repr(prompt[:60])}...", file=sys.stderr)
-    print(f"[MCP-DEBUG] negative_prompt: {repr(negative_prompt[:60])}...", file=sys.stderr)
-    print(f"[MCP-DEBUG] sampler: {repr(sampler)}, scheduler: {repr(scheduler)}", file=sys.stderr)
-    print(f"[MCP-DEBUG] lora: {repr(lora)}, lora_weight: {lora_weight}", file=sys.stderr)
-    print(f"[MCP-DEBUG] loras: {repr(loras)}", file=sys.stderr)
+    # Entry-point parameters, logged at DEBUG so a normal run stays quiet.
+    log_debug("[MCP-DEBUG] === generate_logo called ===")
+    log_debug(f"[MCP-DEBUG] prompt: {repr(prompt[:60])}...")
+    log_debug(f"[MCP-DEBUG] negative_prompt: {repr(negative_prompt[:60])}...")
+    log_debug(f"[MCP-DEBUG] sampler: {repr(sampler)}, scheduler: {repr(scheduler)}")
+    log_debug(f"[MCP-DEBUG] lora: {repr(lora)}, lora_weight: {lora_weight}")
+    log_debug(f"[MCP-DEBUG] loras: {repr(loras)}")
     try:
         # Ensure server is running
         status = get_comfyui_status()
         if not status.get("running"):
             return {"error": "ComfyUI not running", "job_id": None, "status": "failed"}
-        
+
         # Inject textual inversion embedding into negative prompt if specified
         if negative_embedding:
             embedding_tag = f"(embedding:{negative_embedding}:1.0)"
             negative_prompt = f"{negative_prompt}, {embedding_tag}"
-        
+
         # Validate LoRA if specified
         if lora and not _validate_lora(lora):
             available = _get_available_loras()[:5]
@@ -962,39 +1076,39 @@ def generate_logo(
                 "error": f"LoRA not found: {lora}",
                 "available_loras": available,
                 "job_id": None,
-                "status": "failed"
+                "status": "failed",
             }
-        
+
         # Load workflow template (resolved relative to this package, never absolute)
         workflow_path = _workflow_path("gguf_logo_template_api.json")
-        with open(workflow_path, 'r') as f:
+        with open(workflow_path) as f:
             workflow = json.load(f)
-        
+
         # Build LoRAs list (backward compat: single lora -> list)
         loras_list = []
         if loras:
             loras_list = loras
         elif lora:
             loras_list = [{"name": lora, "weight": lora_weight}]
-        
+
         # Validate all LoRAs
         if loras_list:
             for lora_config in loras_list:
-                if not _validate_lora(lora_config["name"]):
+                if not _validate_lora(str(lora_config["name"])):
                     available = _get_available_loras()[:5]
                     return {
                         "error": f"LoRA not found: {lora_config['name']}",
                         "available_loras": available,
                         "job_id": None,
-                        "status": "failed"
+                        "status": "failed",
                     }
             # Inject all LoRAs as chained nodes
             workflow = _inject_lora_nodes(workflow, loras_list)
-        
+
         # Generate seed if not provided
         if seed is None:
             seed = secrets.randbits(32)
-        
+
         # Update workflow with parameters - FIXED WIRING
         for node_id, node in workflow.items():
             # Positive prompt
@@ -1015,7 +1129,7 @@ def generate_logo(
             elif node.get("class_type") == "EmptyLatentImage":
                 node["inputs"]["width"] = width
                 node["inputs"]["height"] = height
-        
+
         # Build metadata payload for native PNG embedding alongside generation
         logo_gen_info = {
             "positive_prompt": prompt,
@@ -1029,28 +1143,21 @@ def generate_logo(
             "width": width,
             "height": height,
             "model": "",
-            "loras": [{"name": l["name"], "weight": l.get("weight", 0.8)} for l in loras_list],
+            "loras": [{"name": lo["name"], "weight": lo.get("weight", 0.8)} for lo in loras_list],
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "generator": "comfyui-logo-mcp/1.0",
+            "generator": _generator_tag(),
         }
-        
+
         # Persist debug trace
         _trace_workflow(workflow, "generate_logo")
-        
+
         # Submit to ComfyUI — extra_pnginfo lands in PNG via native SaveImage node
         response = requests.post(
             f"{COMFYUI_URL}/prompt",
-            json={
-                "prompt": workflow,
-                "extra_data": {
-                    "extra_pnginfo": {
-                        "LogoGenInfo": logo_gen_info
-                    }
-                }
-            },
-            timeout=30
+            json={"prompt": workflow, "extra_data": {"extra_pnginfo": {"LogoGenInfo": logo_gen_info}}},
+            timeout=30,
         )
-        
+
         if response.status_code == 200:
             result = response.json()
             job_id = result.get("prompt_id")
@@ -1066,56 +1173,46 @@ def generate_logo(
                     "cfg": cfg_scale,
                     "sampler": sampler,
                     "scheduler": scheduler,
-                    "loras": [{k: v for k, v in l.items() if k in ("name", "weight")} for l in loras_list],
+                    "loras": [{k: v for k, v in lo.items() if k in ("name", "weight")} for lo in loras_list],
                 }
                 _save_job_params(_JOB_PARAMS)
-            return {
-                "job_id": job_id,
-                "status": "pending",
-                "seed": seed,
-                "estimated_time_sec": 75
-            }
+            return {"job_id": job_id, "status": "pending", "seed": seed, "estimated_time_sec": 75}
         else:
-            return {
-                "error": f"ComfyUI error: {response.status_code}",
-                "job_id": None,
-                "status": "failed"
-            }
+            return {"error": f"ComfyUI error: {response.status_code}", "job_id": None, "status": "failed"}
     except Exception as e:
-        return {
-            "error": str(e),
-            "job_id": None,
-            "status": "failed"
-        }
+        return {"error": str(e), "job_id": None, "status": "failed"}
+
 
 # ============================================================================
 # TOOL 6: get_job_status
 # ============================================================================
 @mcp.tool()
-def get_job_status(job_id: str) -> Dict[str, Any]:
+def get_job_status(job_id: str) -> dict[str, Any]:
     """Poll for job completion"""
     try:
         # Check history
         response = requests.get(f"{COMFYUI_URL}/history/{job_id}", timeout=10)
-        
+
         if response.status_code == 200:
             history = response.json()
             job_data = history.get(job_id, {})
-            
+
             if job_data.get("outputs"):
                 # Job completed
                 images = []
                 for node_id, output in job_data["outputs"].items():
                     if "images" in output:
                         for img in output["images"]:
-                            images.append({
-                                "filename": img.get("filename"),
-                                "subfolder": img.get("subfolder"),
-                                "url": f"{COMFYUI_URL}/view?filename={img.get('filename')}&subfolder={img.get('subfolder')}"
-                            })
-                
+                            images.append(
+                                {
+                                    "filename": img.get("filename"),
+                                    "subfolder": img.get("subfolder"),
+                                    "url": f"{COMFYUI_URL}/view?filename={img.get('filename')}&subfolder={img.get('subfolder')}",
+                                }
+                            )
+
                 # Auto-embed metadata for completed jobs (best-effort)
-                if embed_metadata and job_id in _JOB_PARAMS:
+                if job_id in _JOB_PARAMS:
                     params = _JOB_PARAMS[job_id]
                     for img_meta in images:
                         sub = img_meta.get("subfolder", "") or ""
@@ -1125,36 +1222,16 @@ def get_job_status(job_id: str) -> Dict[str, Any]:
                                 embed_metadata(img_path, params, overwrite=True)
                             except Exception:
                                 pass  # best-effort: don't fail generation
-                
-                return {
-                    "status": "completed",
-                    "progress": 1.0,
-                    "images": images,
-                    "error": None
-                }
+
+                return {"status": "completed", "progress": 1.0, "images": images, "error": None}
             elif job_data.get("prompt"):
                 # Job exists but may be running
-                return {
-                    "status": "running",
-                    "progress": 0.5,
-                    "images": [],
-                    "error": None
-                }
-        
+                return {"status": "running", "progress": 0.5, "images": [], "error": None}
+
         # Job not found in history yet
-        return {
-            "status": "pending",
-            "progress": 0.0,
-            "images": [],
-            "error": None
-        }
+        return {"status": "pending", "progress": 0.0, "images": [], "error": None}
     except Exception as e:
-        return {
-            "status": "error",
-            "progress": 0.0,
-            "images": [],
-            "error": str(e)
-        }
+        return {"status": "error", "progress": 0.0, "images": [], "error": str(e)}
 
 
 # ============================================================================
@@ -1163,31 +1240,31 @@ def get_job_status(job_id: str) -> Dict[str, Any]:
 @mcp.tool()
 def generate_ipadapter(
     prompt: str,
-    reference_images: List[str],
+    reference_images: list[str],
     negative_prompt: str = "text, watermark, blurry, low quality",
-    negative_embedding: Optional[str] = None,
+    negative_embedding: str | None = None,
     width: int = 512,
     height: int = 512,
     steps: int = 10,
     cfg_scale: float = 7.5,
     sampler: str = "dpmpp_2m",
     scheduler: str = "karras",
-    seed: Optional[int] = None,
+    seed: int | None = None,
     reference_weight: float = 0.6,
     weight_type: str = "style transfer",
     denoise: float = 1.0,
     start_at: float = 0.0,
     end_at: float = 1.0,
     embeds_scaling: str = "V only",
-    loras: Optional[List[Dict[str, Union[str, float]]]] = None,
+    loras: list[dict[str, str | float]] | None = None,
     output_format: str = "png",
-    output_prefix: str = "ipadapter"
-) -> Dict[str, Any]:
+    output_prefix: str = "ipadapter",
+) -> dict[str, Any]:
     """Generate image with IP-Adapter multi-reference style blending.
-    
+
     Feeds 1--4 reference images into the diffusion model to influence
     style, composition, and content of the generated output.
-    
+
     Args:
         prompt: Text prompt describing desired output
         reference_images: List of 1-4 image filenames from comfyui/input/
@@ -1209,7 +1286,7 @@ def generate_ipadapter(
         loras: Optional list of LoRA configs [{"name": str, "weight": float}]
         output_format: Always "png" for now
         output_prefix: Filename prefix for saved images
-        
+
     Returns:
         Dict with job_id, status, queue_position
     """
@@ -1218,42 +1295,45 @@ def generate_ipadapter(
         status = get_comfyui_status()
         if not status.get("running"):
             return {"error": "ComfyUI not running", "job_id": None, "status": "failed"}
-        
+
         # Inject textual inversion embedding into negative prompt if specified
         if negative_embedding:
             embedding_tag = f"(embedding:{negative_embedding}:1.0)"
             negative_prompt = f"{negative_prompt}, {embedding_tag}"
-        
+
         # Validate reference images
         if not reference_images:
             return {"error": "At least 1 reference image required", "job_id": None, "status": "failed"}
         if len(reference_images) > 4:
-            return {"error": f"Maximum 4 reference images supported, got {len(reference_images)}", "job_id": None, "status": "failed"}
-        
+            return {
+                "error": f"Maximum 4 reference images supported, got {len(reference_images)}",
+                "job_id": None,
+                "status": "failed",
+            }
+
         input_dir = os.path.join(COMFYUI_PATH, "input")
         for img_name in reference_images:
             if not os.path.isfile(os.path.join(input_dir, img_name)):
                 return {"error": f"Reference image not found in input/: {img_name}", "job_id": None, "status": "failed"}
-        
+
         # Load workflow template (resolved relative to this package, never absolute)
         wf_path = _workflow_path("ipadapter_logo_template_api.json")
-        with open(wf_path, "r") as f:
+        with open(wf_path) as f:
             template = json.load(f)
         workflow = copy.deepcopy(template)
-        
+
         # Validate and inject LoRAs
         if loras:
             for lora_config in loras:
-                if not _validate_lora(lora_config["name"]):
+                if not _validate_lora(str(lora_config["name"])):
                     available = _get_available_loras()[:5]
                     return {
                         "error": f"LoRA not found: {lora_config['name']}",
                         "available_loras": available,
                         "job_id": None,
-                        "status": "failed"
+                        "status": "failed",
                     }
             workflow = _inject_lora_nodes(workflow, loras)
-        
 
         # Update prompt texts on existing CLIPTextEncode nodes
         for node in workflow.values():
@@ -1271,13 +1351,13 @@ def generate_ipadapter(
             weight_type=weight_type,
             start_at=start_at,
             end_at=end_at,
-            embeds_scaling=embeds_scaling
+            embeds_scaling=embeds_scaling,
         )
-        
+
         # Seed
         if seed is None:
             seed = secrets.randbits(32)
-        
+
         # Replace template placeholders with actual values
         for node_id, node in workflow.items():
             if node.get("class_type") == "CLIPTextEncode":
@@ -1286,7 +1366,7 @@ def generate_ipadapter(
             if node.get("class_type") == "CLIPTextEncode":
                 if "negative_prompt" in str(node.get("inputs", {}).get("text", "")).lower():
                     node["inputs"]["text"] = negative_prompt
-        
+
         # Direct node updates (known IDs from template)
         workflow["8"]["inputs"]["text"] = prompt
         workflow["9"]["inputs"]["text"] = negative_prompt
@@ -1299,21 +1379,21 @@ def generate_ipadapter(
         workflow["11"]["inputs"]["scheduler"] = scheduler
         workflow["11"]["inputs"]["denoise"] = denoise
         workflow["13"]["inputs"]["filename_prefix"] = output_prefix
-        
+
         # VALIDATE: traverse model chain from KSampler to Base
         ok, msg = _validate_model_chain(workflow)
         if not ok:
-            print(f"[MCP-ERROR] Model chain validation failed: {msg}", file=sys.stderr)
+            log_error(f"[MCP-ERROR] Model chain validation failed: {msg}")
             return {"error": f"Pipeline validation failed: {msg}", "job_id": None, "status": "failed"}
-        print(f"[MCP-TRACE] Model chain OK: {msg}", file=sys.stderr)
-        
+        log_debug(f"[MCP-TRACE] Model chain OK: {msg}")
+
         # Build metadata payload FROM ACTUAL WORKFLOW NODES (post-mutation source of truth)
         ksampler_node = None
         for nid, node in workflow.items():
             if node.get("class_type") == "KSampler":
                 ksampler_node = node
                 break
-        
+
         logo_gen_info = {
             "positive_prompt": prompt,
             "negative_prompt": negative_prompt,
@@ -1326,7 +1406,7 @@ def generate_ipadapter(
             "width": workflow["10"]["inputs"]["width"],
             "height": workflow["10"]["inputs"]["height"],
             "model": "",
-            "loras": [{"name": l["name"], "weight": l.get("weight", 0.8)} for l in (loras or [])],
+            "loras": [{"name": lo["name"], "weight": lo.get("weight", 0.8)} for lo in (loras or [])],
             "reference_images": reference_images,
             "reference_weight": reference_weight,
             "weight_type": weight_type,
@@ -1334,31 +1414,24 @@ def generate_ipadapter(
             "end_at": end_at,
             "embeds_scaling": embeds_scaling,
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "generator": "comfyui-logo-mcp/1.2 (ipadapter)",
+            "generator": _generator_tag("ipadapter"),
         }
-        
+
         _trace_workflow(workflow, "generate_ipadapter")
-        
+
         # Submit to ComfyUI with extra_pnginfo
         res = requests.post(
             f"{COMFYUI_URL}/prompt",
-            json={
-                "prompt": workflow,
-                "extra_data": {
-                    "extra_pnginfo": {
-                        "LogoGenInfo": logo_gen_info
-                    }
-                }
-            },
-            timeout=30
+            json={"prompt": workflow, "extra_data": {"extra_pnginfo": {"LogoGenInfo": logo_gen_info}}},
+            timeout=30,
         )
         data = res.json()
-        
+
         if "prompt_id" not in data:
             return {"error": data.get("error", "Unknown error"), "job_id": None, "status": "failed"}
-        
+
         job_id = data["prompt_id"]
-        
+
         # Cache params for metadata embedding later
         params = {
             "prompt": prompt,
@@ -1380,17 +1453,12 @@ def generate_ipadapter(
             "denoise": denoise,
             "start_at": start_at,
             "end_at": end_at,
-            "embeds_scaling": embeds_scaling
+            "embeds_scaling": embeds_scaling,
         }
         _JOB_PARAMS[job_id] = params
         _save_job_params(_JOB_PARAMS)
-        
-        return {
-            "job_id": job_id,
-            "status": "queued",
-            "queue_position": 0,
-            "prompt_id": job_id
-        }
+
+        return {"job_id": job_id, "status": "queued", "queue_position": 0, "prompt_id": job_id}
     except Exception as e:
         return {"error": str(e), "job_id": None, "status": "failed"}
 
@@ -1400,19 +1468,19 @@ def generate_ipadapter(
 # ============================================================================
 @mcp.tool()
 def batch_generate_ipadapter(
-    prompts: List[str],
-    reference_images: List[str],
-    shared_params: Optional[Union[Dict[str, Any], str]] = None,
-    randomize: Optional[Union[Dict[str, Any], str]] = None,
+    prompts: list[str],
+    reference_images: list[str],
+    shared_params: dict[str, Any] | str | None = None,
+    randomize: dict[str, Any] | str | None = None,
     deduplicate_seeds: bool = True,
     priority: str = "normal",
-    keep_loaded: bool = False
-) -> Dict[str, Any]:
+    keep_loaded: bool = False,
+) -> dict[str, Any]:
     """Submit batch IP-Adapter jobs with optional per-generation randomization.
-    
+
     All jobs in the batch use the SAME reference images, but each prompt
     creates a distinct output. Supports parameter randomization per job.
-    
+
     Args:
         prompts: List of positive prompt strings (one per job)
         reference_images: Shared reference images for all jobs in batch
@@ -1420,7 +1488,7 @@ def batch_generate_ipadapter(
         randomize: Per-generation randomization specs (overrides shared_params)
         deduplicate_seeds: Ensure unique seeds across batch
         priority: Queue priority hint
-        
+
     Returns:
         Batch metadata with batch_id, total_jobs, queued_jobs, job_ids
     """
@@ -1428,11 +1496,23 @@ def batch_generate_ipadapter(
         batch_id = f"batch_ipa_{int(time.time())}"
         jobs = []
         used_seeds = set()
-        
+
         shared_params = _parse_param(shared_params)
         randomize = _parse_param(randomize)
+        # shared_params arrives as Any from the tool boundary: a caller can pass
+        # a JSON string instead of an object. Coerce rather than let .items()
+        # raise deep inside the batch loop.
         params = shared_params or {}
-        
+        if isinstance(params, str):
+            try:
+                params = json.loads(params) if params.strip() else {}
+            except json.JSONDecodeError:
+                return {"error": "shared_params was a string but not valid JSON", "success": False}
+        if not isinstance(params, dict):
+            return {"error": f"shared_params must be an object, got {type(params).__name__}", "success": False}
+        if randomize and not isinstance(randomize, dict):
+            return {"error": f"randomize must be an object, got {type(randomize).__name__}", "success": False}
+
         for i, prompt in enumerate(prompts):
             resolved = dict(params)
             if randomize:
@@ -1441,7 +1521,7 @@ def batch_generate_ipadapter(
                         resolved["loras"] = _resolve_lora_config(spec)
                     else:
                         resolved[key] = _resolve_param(spec, key)
-            
+
             # Seed deduplication
             if deduplicate_seeds:
                 seed = resolved.get("seed")
@@ -1450,8 +1530,8 @@ def batch_generate_ipadapter(
                         seed = secrets.randbits(32)
                         resolved["seed"] = seed
                     used_seeds.add(seed)
-            
-            print(f"[MCP-BATCH-TRACE] Submitting prompt {i+1}/{len(prompts)}: {prompt[:40]}...", file=sys.stderr)
+
+            log_debug(f"[MCP-BATCH-TRACE] Submitting prompt {i + 1}/{len(prompts)}: {prompt[:40]}...")
             result = generate_ipadapter(
                 prompt=prompt,
                 reference_images=reference_images,
@@ -1471,14 +1551,18 @@ def batch_generate_ipadapter(
                 end_at=resolved.get("end_at", 1.0),
                 embeds_scaling=resolved.get("embeds_scaling", "V only"),
                 loras=resolved.get("loras"),
-                output_prefix=resolved.get("output_prefix", f"ipadapter_batch_{i:04d}")
+                output_prefix=resolved.get("output_prefix", f"ipadapter_batch_{i:04d}"),
             )
-            print(f"[MCP-BATCH-TRACE] Prompt {i+1} result: type={type(result).__name__}, has_job_id={result.get('job_id') is not None}, job_id={result.get('job_id')}, error={result.get('error')}", file=sys.stderr)
+            log_debug(
+                f"[MCP-BATCH-TRACE] Prompt {i + 1} result: type={type(result).__name__}, has_job_id={result.get('job_id') is not None}, job_id={result.get('job_id')}, error={result.get('error')}"
+            )
             if result.get("job_id"):
                 jobs.append(result["job_id"])
             else:
-                print(f"[MCP-BATCH-TRACE] WARNING: Prompt {i+1} returned NO job_id. Full result keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}", file=sys.stderr)
-        
+                log_debug(
+                    f"[MCP-BATCH-TRACE] WARNING: Prompt {i + 1} returned NO job_id. Full result keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}"
+                )
+
         # Models are held for the whole batch (correct trade) and released at
         # the end unless the caller asked to keep them warm for another run.
         vram = _release_after_batch(keep_loaded, len(jobs))
@@ -1493,34 +1577,30 @@ def batch_generate_ipadapter(
             "models_unloaded": bool(vram and vram.get("success")),
         }
     except Exception as e:
-        return {
-            "batch_id": None,
-            "error": str(e),
-            "total_jobs": 0,
-            "queued_jobs": 0
-        }
+        return {"batch_id": None, "error": str(e), "total_jobs": 0, "queued_jobs": 0}
+
 
 # ============================================================================
 # TOOL 7: list_models
 # ============================================================================
 @mcp.tool()
-def list_models(model_type: str = "all") -> List[Dict[str, Any]]:
+def list_models(model_type: str = "all") -> list[dict[str, Any]]:
     """Discover available models: unet, clip, vae, lora"""
     models = []
-    
+
     model_paths = {
         "unet": f"{COMFYUI_PATH}/models/unet",
         "clip": f"{COMFYUI_PATH}/models/clip",
         "vae": f"{COMFYUI_PATH}/models/vae",
         "loras": f"{COMFYUI_PATH}/models/loras",
         "ipadapter": f"{COMFYUI_PATH}/models/ipadapter",
-        "clip_vision": f"{COMFYUI_PATH}/models/clip_vision"
+        "clip_vision": f"{COMFYUI_PATH}/models/clip_vision",
     }
-    
+
     for mtype, path in model_paths.items():
         if model_type != "all" and model_type != mtype:
             continue
-        
+
         if os.path.exists(path):
             for filename in os.listdir(path):
                 filepath = os.path.join(path, filename)
@@ -1528,15 +1608,18 @@ def list_models(model_type: str = "all") -> List[Dict[str, Any]]:
                     ext = os.path.splitext(filename)[1].lower()
                     if ext in [".gguf", ".safetensors", ".ckpt", ".pt"]:
                         size_mb = os.path.getsize(filepath) / (1024**2)
-                        models.append({
-                            "name": filename,
-                            "type": mtype,
-                            "path": filepath,
-                            "size_mb": round(size_mb, 2),
-                            "format": ext.lstrip(".")
-                        })
-    
+                        models.append(
+                            {
+                                "name": filename,
+                                "type": mtype,
+                                "path": filepath,
+                                "size_mb": round(size_mb, 2),
+                                "format": ext.lstrip("."),
+                            }
+                        )
+
     return models
+
 
 # ============================================================================
 # TOOL 8: download_model
@@ -1546,8 +1629,8 @@ def download_model(
     url: str,
     filename: str,
     model_type: str,
-    api_token: Optional[str] = None,
-) -> Dict[str, Any]:
+    api_token: str | None = None,
+) -> dict[str, Any]:
     """Download a model file into the right ComfyUI models subdirectory.
 
     The contract is deliberately tight, because this writes into the user's
@@ -1585,8 +1668,7 @@ def download_model(
     if model_type not in type_dirs:
         return {
             "success": False,
-            "error": f"Unknown model type: {model_type!r}. "
-                     f"Valid types: {sorted(type_dirs)}",
+            "error": f"Unknown model type: {model_type!r}. Valid types: {sorted(type_dirs)}",
             "bytes_downloaded": 0,
         }
 
@@ -1605,7 +1687,7 @@ def download_model(
         return {
             "success": False,
             "error": f"extension {ext!r} is not allowed for model_type "
-                     f"{model_type!r} (allowed: {sorted(allowed_ext[model_type])})",
+            f"{model_type!r} (allowed: {sorted(allowed_ext[model_type])})",
             "bytes_downloaded": 0,
         }
 
@@ -1667,13 +1749,13 @@ def download_model(
 # ============================================================================
 @mcp.tool()
 def batch_generate(
-    prompts: List[str],
-    shared_params: Optional[Union[Dict[str, Any], str]] = None,
-    randomize: Optional[Union[Dict[str, Any], str]] = None,
+    prompts: list[str],
+    shared_params: dict[str, Any] | str | None = None,
+    randomize: dict[str, Any] | str | None = None,
     deduplicate_seeds: bool = True,
     priority: str = "normal",
-    keep_loaded: bool = False
-) -> Dict[str, Any]:
+    keep_loaded: bool = False,
+) -> dict[str, Any]:
     """Submit batch jobs with optional per-generation randomization.
 
     Args:
@@ -1695,7 +1777,19 @@ def batch_generate(
         shared_params = _parse_param(shared_params)
         randomize = _parse_param(randomize)
 
+        # shared_params arrives as Any from the tool boundary: a caller can pass
+        # a JSON string instead of an object. Coerce rather than let .items()
+        # raise deep inside the batch loop.
         params = shared_params or {}
+        if isinstance(params, str):
+            try:
+                params = json.loads(params) if params.strip() else {}
+            except json.JSONDecodeError:
+                return {"error": "shared_params was a string but not valid JSON", "success": False}
+        if not isinstance(params, dict):
+            return {"error": f"shared_params must be an object, got {type(params).__name__}", "success": False}
+        if randomize and not isinstance(randomize, dict):
+            return {"error": f"randomize must be an object, got {type(randomize).__name__}", "success": False}
 
         for i, prompt in enumerate(prompts):
             # Resolve randomized parameters (randomize overrides shared_params)
@@ -1719,11 +1813,12 @@ def batch_generate(
             # VRAM soft warning for multi-LoRA
             resolved_loras = resolved.get("loras")
             if resolved_loras and isinstance(resolved_loras, list) and len(resolved_loras) > 1:
-                if log_warning:
-                    log_warning(f"Multiple LoRAs ({len(resolved_loras)}) may exceed VRAM on 6GB GPU. User Beware — proceed at own risk.")
+                log_warning(
+                    f"Multiple LoRAs ({len(resolved_loras)}) may exceed VRAM on 6GB GPU. User Beware — proceed at own risk."
+                )
 
             # Submit generation with resolved concrete values
-            print(f"[MCP-BATCH-TRACE] Submitting prompt {i+1}/{len(prompts)}: {prompt[:40]}...", file=sys.stderr)
+            log_debug(f"[MCP-BATCH-TRACE] Submitting prompt {i + 1}/{len(prompts)}: {prompt[:40]}...")
             result = generate_logo(
                 prompt=prompt,
                 negative_prompt=resolved.get("negative_prompt", "text, watermark, blurry"),
@@ -1735,13 +1830,17 @@ def batch_generate(
                 sampler=resolved.get("sampler", "dpmpp_2m"),
                 scheduler=resolved.get("scheduler", "karras"),
                 loras=resolved.get("loras"),
-                seed=resolved.get("seed")
+                seed=resolved.get("seed"),
             )
-            print(f"[MCP-BATCH-TRACE] Prompt {i+1} result: type={type(result).__name__}, has_job_id={result.get('job_id') is not None}, job_id={result.get('job_id')}, error={result.get('error')}", file=sys.stderr)
+            log_debug(
+                f"[MCP-BATCH-TRACE] Prompt {i + 1} result: type={type(result).__name__}, has_job_id={result.get('job_id') is not None}, job_id={result.get('job_id')}, error={result.get('error')}"
+            )
             if result.get("job_id"):
                 jobs.append(result["job_id"])
             else:
-                print(f"[MCP-BATCH-TRACE] WARNING: Prompt {i+1} returned NO job_id. Keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}", file=sys.stderr)
+                log_debug(
+                    f"[MCP-BATCH-TRACE] WARNING: Prompt {i + 1} returned NO job_id. Keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}"
+                )
 
         # Models are held for the whole batch (correct trade) and released at
         # the end unless the caller asked to keep them warm for another run.
@@ -1757,18 +1856,14 @@ def batch_generate(
             "models_unloaded": bool(vram and vram.get("success")),
         }
     except Exception as e:
-        return {
-            "batch_id": None,
-            "error": str(e),
-            "total_jobs": 0,
-            "queued_jobs": 0
-        }
+        return {"batch_id": None, "error": str(e), "total_jobs": 0, "queued_jobs": 0}
+
 
 # ============================================================================
 # TOOL 10: get_vram_usage
 # ============================================================================
 @mcp.tool()
-def get_vram_usage() -> Dict[str, Any]:
+def get_vram_usage() -> dict[str, Any]:
     """Monitor live GPU memory and utilisation.
 
     Reads the driver, not torch: this process holds no CUDA tensors, so torch
@@ -1788,11 +1883,12 @@ def get_vram_usage() -> Dict[str, Any]:
         out["error"] = "nvidia-smi unavailable or returned no data"
     return out
 
+
 # ============================================================================
 # TOOL 11: emergency_cleanup
 # ============================================================================
 @mcp.tool()
-def emergency_cleanup(restart_comfyui: bool = False) -> Dict[str, Any]:
+def emergency_cleanup(restart_comfyui: bool = False) -> dict[str, Any]:
     """Recover GPU memory by unloading ComfyUI's models.
 
     ComfyUI is a separate process and holds the models, so torch.cuda in THIS
@@ -1804,8 +1900,7 @@ def emergency_cleanup(restart_comfyui: bool = False) -> Dict[str, Any]:
         freed = _free_comfyui_vram()
         if freed.get("success"):
             actions.append(
-                "ComfyUI /free unloaded models "
-                f"(used {freed['used_before_mb']}MB -> {freed['used_after_mb']}MB)"
+                f"ComfyUI /free unloaded models (used {freed['used_before_mb']}MB -> {freed['used_after_mb']}MB)"
             )
         else:
             actions.append(f"ComfyUI /free FAILED: {freed.get('error')}")
@@ -1827,6 +1922,7 @@ def emergency_cleanup(restart_comfyui: bool = False) -> Dict[str, Any]:
         }
     except Exception as e:
         return {"freed_mb": None, "actions_taken": actions, "error": str(e), "success": False}
+
 
 # ============================================================================
 # MAIN ENTRY POINT

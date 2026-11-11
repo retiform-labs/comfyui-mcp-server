@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "comfyui-mcp-server"
-version = "2.0.0"
+dynamic = ["version"]
 description = "Agentic ComfyUI image generation over the Model Context Protocol: batch discovery, LoRA shaping, and provenance."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -53,12 +53,19 @@ comfyui-mcp-server = "comfyui_mcp_server.server:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/comfyui_mcp_server"]
 
+[tool.hatch.version]
+# Single source of truth: the package declares __version__, the build reads it.
+# Declaring the version twice let them drift before -- the installed package
+# reported one version while the registry metadata said another.
+path = "src/comfyui_mcp_server/__init__.py"
+
 [tool.hatch.build.targets.sdist]
 include = [
   "/src",
   "/tests",
   "/README.md",
   "/LICENSE",
+  "/CHANGELOG.md",
   "/pyproject.toml",
 ]
 
@@ -68,7 +75,18 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
-ignore = ["E501"]
+ignore = [
+  "E501",   # line length is handled by the formatter's target, not lint
+  "B007",   # `for _key, value in d.items()` with the key unused is idiomatic
+  "SIM105", # try/except/pass around best-effort metadata writes is intentional
+  "SIM102", # nested `if` reads better than one long conjunction here
+  "SIM108", # ternaries hide the branch intent in the workflow-mutation code
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test modules bootstrap sys.path before importing the package under test, so
+# their imports are necessarily below a statement. This is the pattern working.
+"tests/*.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.10"
