@@ -280,9 +280,7 @@ mcp._mcp_server.version = _PKG_VERSION
 # every one of them is overridable per call in generate_ipadapter() and, failing
 # that, by environment variable. A hardcoded model name here silently pins every
 # user to one specific download.
-IPADAPTER_CLIP_VISION_MODEL = os.environ.get(
-    "COMFYUI_CLIP_VISION_MODEL", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
-)
+IPADAPTER_CLIP_VISION_MODEL = os.environ.get("COMFYUI_CLIP_VISION_MODEL", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors")
 IPADAPTER_PLUS_MODEL = os.environ.get("COMFYUI_IPADAPTER_MODEL", "ip-adapter-plus_sdxl_vit-h.bin")
 IPADAPTER_BASIC_MODEL = os.environ.get("COMFYUI_IPADAPTER_BASIC_MODEL", "ip-adapter_sdxl_vit-h.bin")
 

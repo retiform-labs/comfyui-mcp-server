@@ -14,6 +14,18 @@ several tool contracts changed.
 
 ### Changed
 
+- **`generate_logo` is now `generate_image`.** This is a general-purpose image
+  generation server and the public name said otherwise. Consumers calling the
+  old tool name must update the call site.
+- **The provenance payload is keyed `GenerationInfo`** rather than
+  `LogoGenInfo`. Images rendered before this change are still read under the
+  legacy key, so nothing already on disk becomes opaque; only the current key is
+  written to new images.
+- **The IP-Adapter loaders are configurable.** `CLIPVisionLoader` and
+  `IPAdapterModelLoader` no longer assume one installation's filenames: both are
+  arguments on `generate_ipadapter`, and the module defaults are overridable via
+  `COMFYUI_CLIP_VISION_MODEL` and `COMFYUI_IPADAPTER_MODEL`. A different CLIP
+  vision tower or adapter weight was previously a silent failure.
 - **Package renamed** from the internal working name to `comfyui-mcp-server`,
   with the module at `comfyui_mcp_server` and a `src/` layout.
 - **Requires Python 3.11+**, raised from 3.10. This is forced by the Pillow pin

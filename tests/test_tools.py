@@ -282,10 +282,16 @@ class TestConfigurableLoaders(unittest.TestCase):
     def _inject(self, **kwargs):
         wf = {
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "x"}},
-            "8": {"inputs": {"text": "POSITIVE_PROMPT_PLACEHOLDER"}, "class_type": "CLIPTextEncode",
-                  "_meta": {"title": "CLIP Text Encode (Positive)"}},
-            "9": {"inputs": {"text": "NEGATIVE_PROMPT_PLACEHOLDER"}, "class_type": "CLIPTextEncode",
-                  "_meta": {"title": "CLIP Text Encode (Negative)"}},
+            "8": {
+                "inputs": {"text": "POSITIVE_PROMPT_PLACEHOLDER"},
+                "class_type": "CLIPTextEncode",
+                "_meta": {"title": "CLIP Text Encode (Positive)"},
+            },
+            "9": {
+                "inputs": {"text": "NEGATIVE_PROMPT_PLACEHOLDER"},
+                "class_type": "CLIPTextEncode",
+                "_meta": {"title": "CLIP Text Encode (Negative)"},
+            },
         }
         with patch("os.path.isfile", return_value=True):
             return srv._inject_ipadapter_nodes(wf, ["ref.png"], **kwargs)

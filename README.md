@@ -18,7 +18,7 @@ Thirteen tools, split into four groups:
 
 **Lifecycle** -- `system_check` · `start_comfyui` · `stop_comfyui` · `get_comfyui_status`
 
-**Generation** -- `generate_logo` · `generate_ipadapter` · `get_job_status`
+**Generation** -- `generate_image` · `generate_ipadapter` · `get_job_status`
 
 **Batch** -- `batch_generate` · `batch_generate_ipadapter`
 
@@ -56,6 +56,201 @@ generally wants **one dominant adapter and one supporting it**:
 A total weight around `1.3` is normal and is **not** a ceiling -- well-shaped
 stacks run above it and produce the best results.
 
+
+## Tool reference
+
+Every tool returns JSON. `generate_*` and `batch_*` are **asynchronous**: they
+queue work and return a job id immediately, because a diffusion run takes far
+longer than any sane request timeout. Poll `get_job_status` for the result.
+
+### Lifecycle
+
+#### `system_check()`
+
+Reports GPU name, driver version, total and free VRAM, and whether ComfyUI is
+responding. Reads `nvidia-smi`, so it sees the whole GPU -- including memory
+held by ComfyUI, which a torch call inside this process never could.
+
+```jsonc
+// no arguments
+{"gpu": "NVIDIA GeForce RTX 4090", "vram_total_mb": 24564,
+ "vram_free_mb": 3703, "comfyui_running": true, "comfyui_version": "0.x"}
+```
+
+#### `start_comfyui(lowvram=True, fp16=True, port=8188)`
+
+Launches ComfyUI if it is not already running. `lowvram` is the safe default for
+cards under ~8 GB.
+
+```jsonc
+{"success": true, "pid": 41233, "port": 8188, "already_running": false}
+```
+
+#### `stop_comfyui(force=False)`
+
+Stops the ComfyUI process. `force=True` sends SIGKILL when a normal shutdown
+hangs.
+
+#### `get_comfyui_status()`
+
+Lightweight liveness check -- cheaper than `system_check` because it never shells
+out to the driver.
+
+```jsonc
+{"running": true, "port": 8188, "queue_remaining": 0}
+```
+
+### Generation
+
+#### `generate_image(...)`
+
+Text-to-image through the packaged SDXL workflow.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `prompt` | *required* | What to generate |
+| `negative_prompt` | `"text, watermark, blurry, low quality"` | What to avoid |
+| `negative_embedding` | `None` | A textual-inversion embedding name |
+| `width` / `height` | `1024` / `1024` | |
+| `steps` | `20` | |
+| `cfg_scale` | `7.0` | |
+| `sampler` | `"euler_ancestral"` | |
+| `scheduler` | `"normal"` | |
+| `lora` | `None` | One LoRA filename from `models/loras/` |
+| `lora_weight` | `0.8` | |
+| `loras` | `None` | Several at once: `[{"name": ..., "weight": ...}]` |
+| `seed` | `None` | Omit for a random seed |
+| `output_format` | `"png"` | PNG carries provenance metadata |
+
+```jsonc
+{"prompt": "a geometric fox mark, single flat ink colour, high contrast",
+ "width": 1024, "height": 1024, "steps": 30, "seed": 1777732588}
+// -> {"job_id": "a3f9...", "status": "queued", "params": {...}}
+```
+
+#### `generate_ipadapter(...)`
+
+Reference-guided generation. Feeds 1--4 images into the model to steer style,
+composition or content.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `prompt` | *required* | |
+| `reference_images` | *required* | 1--4 filenames from `comfyui/input/` |
+| `reference_weight` | `0.6` | How hard the references pull |
+| `weight_type` | `"style transfer"` | Also `"linear"`, `"ease in"`, `"strong style transfer"` |
+| `start_at` / `end_at` | `0.0` / `1.0` | Fraction of sampling the adapter applies over |
+| `embeds_scaling` | `"V only"` | |
+| `width` / `height` | `512` / `512` | |
+| `steps` | `10` | |
+| `cfg_scale` | `7.5` | |
+| `sampler` / `scheduler` | `"dpmpp_2m"` / `"karras"` | |
+| `clip_vision_model` | env default | Override the CLIP vision tower |
+| `ipadapter_model` | env default | Override the IP-Adapter weight |
+
+```jsonc
+{"prompt": "the reference mark, redrawn as a woodcut",
+ "reference_images": ["ref-a.png", "ref-b.png"],
+ "reference_weight": 0.65, "weight_type": "style transfer"}
+```
+
+> **Reference images must already exist in ComfyUI's `input/` directory.** This
+> tool does not upload files; it names them. A missing file is a raised error,
+> not a silent no-op.
+
+#### `get_job_status(job_id)`
+
+Polls a queued job. Returns `queued`, `running`, `completed` or `failed`, and on
+completion the output image filenames with their provenance payload.
+
+```jsonc
+{"job_id": "a3f9...", "status": "completed",
+ "images": [{"filename": "image_output_00042_.png", "subfolder": "", "type": "output"}],
+ "params": {"seed": 1777732588, "sampler": "euler_ancestral", "steps": 30, ...}}
+```
+
+### Batch
+
+#### `batch_generate(prompts, shared_params=None, randomize=None, deduplicate_seeds=True, priority="normal", keep_loaded=False)`
+
+Queues one job per prompt, optionally randomising parameters across the batch.
+
+- `prompts` -- a list of positive prompt strings, one per job.
+- `shared_params` -- static parameters applied to every job (accepts an object
+  or a JSON string).
+- `randomize` -- per-job draws; overrides `shared_params` where it names the same key.
+- `deduplicate_seeds` -- guarantees no two jobs share a seed.
+- `keep_loaded` -- leave the model resident after the batch. See *VRAM behaviour*.
+
+```jsonc
+{"prompts": ["a fox mark", "an owl mark", "a wave mark"],
+ "shared_params": {"width": 1024, "height": 1024, "steps": 24},
+ "randomize": {"seed": "random", "cfg_scale": [5.0, 9.0],
+               "loras": {"mode": "auto", "count": [1, 2], "weight": [0.25, 0.7]}}}
+```
+
+Randomisation spec forms:
+
+| Form | Meaning |
+|---|---|
+| `"random"` | Draw from a curated safe pool |
+| `"random_unsafe"` | Draw from the full pool, including values that often break |
+| `[min, max]` | Uniform draw in a numeric range |
+| `{"mode": "auto", "count": [1,3], "weight": [0.25,0.7]}` | LoRA stack selection |
+| scalar (e.g. `24`) | Fixed at that value |
+
+#### `batch_generate_ipadapter(prompts, reference_images, ...)`
+
+The reference-guided equivalent, taking the same batch arguments plus the
+IP-Adapter parameters from `generate_ipadapter`.
+
+### Hardware
+
+#### `list_models(model_type="all")`
+
+Lists what is actually on disk, with sizes. `model_type` filters to one of
+`unet`, `clip`, `vae`, `loras`, `ipadapter`, `clip_vision`.
+
+```jsonc
+{"model_type": "loras"}
+// -> [{"name": "copperplate_v2.safetensors", "type": "loras",
+//      "size_mb": 172.4, "format": "safetensors"}]
+```
+
+#### `download_model(url, model_type, filename=None, expected_sha256=None, token=None)`
+
+Downloads from a Civitai-style URL. Writes atomically -- a partial download never
+lands under the final name -- and sanitises `filename` to a single path
+component, so a crafted URL cannot write outside the model directory.
+
+```jsonc
+{"url": "https://civitai.com/api/download/models/12345",
+ "model_type": "loras", "filename": "copperplate_v2.safetensors"}
+```
+
+#### `get_vram_usage()`
+
+Current GPU memory as the driver reports it. Reads `nvidia-smi` rather than this
+process's CUDA context, which never allocates and would always read zero.
+
+```jsonc
+{"used_mb": 9216, "total_mb": 24564, "free_mb": 15348}
+```
+
+#### `emergency_cleanup(restart_comfyui=False)`
+
+Frees GPU memory by asking ComfyUI to unload its models, then re-reads the driver
+to report what was **actually** released. Useful before handing the GPU to a
+non-ComfyUI job.
+
+```jsonc
+{"models_unloaded": ["sdxl-base"], "vram_freed_mb": 9001,
+ "vram_before_mb": 9216, "vram_after_mb": 215}
+```
+
+> `restart_comfyui=True` is the heavier option: it stops and restarts the server.
+> Use it when a normal unload does not recover the memory.
+
 ## Requirements
 
 - **Python 3.11+**
@@ -69,10 +264,15 @@ stacks run above it and produce the best results.
 
 The IP-Adapter templates reference these filenames; substitute your own:
 
-| Node | Default filename |
-|---|---|
-| `CLIPVisionLoader` | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` |
-| `IPAdapterModelLoader` | `ip-adapter-plus_sdxl_vit-h.bin` |
+| Node | Default filename | Override with |
+|---|---|---|
+| `CLIPVisionLoader` | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | `clip_vision_model=` or `COMFYUI_CLIP_VISION_MODEL` |
+| `IPAdapterModelLoader` | `ip-adapter-plus_sdxl_vit-h.bin` | `ipadapter_model=` or `COMFYUI_IPADAPTER_MODEL` |
+
+These are **defaults, not requirements.** If your install uses a different CLIP
+vision tower or IP-Adapter weight, pass the filename to `generate_ipadapter` or
+set the environment variable -- no code change, and no failure to diagnose
+silently.
 
 A negative embedding is optional; the templates accept one via the
 `negative_embedding` argument (e.g. `DeepNegative_xl_v1`).
@@ -142,15 +342,18 @@ boundaries.
 ## Provenance
 
 Generated PNGs carry an A1111-compatible `parameters` block plus a structured
-`LogoGenInfo` record. Values that were not supplied are written as `?` and are
+`GenerationInfo` record. Values that were not supplied are written as `?` and are
 **never** defaulted -- an invented parameter in an embedded block is a permanent,
 machine-readable lie.
+
+Images rendered before the rename carry the same payload under the key
+`LogoGenInfo`. Both keys are read; only the current one is written.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-python -m unittest discover -s tests -v   # 85 tests
+python -m unittest discover -s tests -v
 ruff check src tests
 ```
 
