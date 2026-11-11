@@ -113,7 +113,7 @@ several tool contracts changed.
 
 - `CHANGELOG.md`, `pyproject.toml` with `src/` layout, and an MIT `LICENSE` with
   joint copyright.
-- Test suite: 85 tests, up from 34. The previous suite covered none of the
+- Test suite: 90 tests, up from 34. The previous suite covered none of the
   thirteen tools and passed vacuously, because it replaced the MCP SDK with a
   `MagicMock` whose `@tool()` decorator returned mocks instead of functions.
   Tests now use a real pass-through double that rejects unknown constructor
