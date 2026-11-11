@@ -307,6 +307,10 @@ lives.
 | `COMFYUI_PATH` | `~/ComfyUI` | ComfyUI install root (the dir with `main.py`) |
 | `COMFYUI_MODELS_PATH` | `$COMFYUI_PATH/models` | Models root |
 | `COMFYUI_OUTPUT_PATH` | `$COMFYUI_PATH/output` | Where renders land |
+| `COMFYUI_CLIP_VISION_MODEL` | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | CLIP vision tower for reference-guided generation |
+| `COMFYUI_IPADAPTER_MODEL` | `ip-adapter-plus_sdxl_vit-h.bin` | IP-Adapter weight (plus variant) |
+| `COMFYUI_IPADAPTER_BASIC_MODEL` | `ip-adapter_sdxl_vit-h.bin` | IP-Adapter weight used by the VRAM-saving fallback |
+| `COMFYUI_DOWNLOAD_TOKEN` | *(none)* | Bearer token for gated model hosts, so it need not travel through a tool argument |
 
 ### MCP client
 
