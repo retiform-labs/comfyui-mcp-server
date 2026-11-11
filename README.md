@@ -150,7 +150,7 @@ machine-readable lie.
 
 ```bash
 pip install -e ".[dev]"
-python -m unittest discover -s tests -v   # 60 tests
+python -m unittest discover -s tests -v   # 85 tests
 ruff check src tests
 ```
 
