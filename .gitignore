@@ -1,0 +1,74 @@
+# --- Python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.Python
+
+# --- Secrets / local env (NEVER commit) ---------------------------------
+.env
+.env.*
+*.env
+.git-credentials
+*.pem
+*.key
+
+# --- Model weights: users must source these themselves ------------------
+# The repo ships code, workflows and instructions. It never ships another
+# party's licensed artifacts.
+*.gguf
+*.safetensors
+*.ckpt
+*.pth
+*.onnx
+*.bin
+*.pt
+models/
+loras/
+embeddings/
+checkpoints/
+clip/
+vae/
+controlnet/
+upscale_models/
+
+# --- Generated output ---------------------------------------------------
+output/
+outputs/
+comfyui/
+comfyui-temp/
+*.job_params_cache.json
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.pdf
+
+# --- Runtime ------------------------------------------------------------
+*.log
+logs/
+*.pid
+*.tmp
+*.bak
+*.old
+*.swp
+
+# --- Editors / OS -------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*~
+
+# --- Tooling ------------------------------------------------------------
+.serena/
+node_modules/
+package-lock.json

@@ -1,0 +1,119 @@
+{
+    "1": {
+        "inputs": {
+            "clip_name1": "clip_l.safetensors",
+            "clip_name2": "clip_g.safetensors",
+            "type": "sdxl"
+        },
+        "class_type": "DualCLIPLoaderGGUF",
+        "_meta": { "title": "Load Dual CLIP (GGUF)" }
+    },
+    "2": {
+        "inputs": {
+            "unet_name": "stable-diffusion-xl-base-1.0-Q5_K_M.gguf"
+        },
+        "class_type": "UnetLoaderGGUF",
+        "_meta": { "title": "Load Diffusion Model (GGUF)" }
+    },
+    "3": {
+        "inputs": {
+            "vae_name": "sdxl_vae.safetensors"
+        },
+        "class_type": "VAELoader",
+        "_meta": { "title": "Load VAE" }
+    },
+    "4": {
+        "inputs": {
+            "image": "REFERENCE_IMAGE_PLACEHOLDER"
+        },
+        "class_type": "LoadImage",
+        "_meta": { "title": "Load Reference Image" }
+    },
+    "5": {
+        "inputs": {
+            "clip_name": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+        },
+        "class_type": "CLIPVisionLoader",
+        "_meta": { "title": "Load CLIP Vision" }
+    },
+    "6": {
+        "inputs": {
+            "ipadapter_file": "ip-adapter-plus_sdxl_vit-h.bin"
+        },
+        "class_type": "IPAdapterModelLoader",
+        "_meta": { "title": "Load IPAdapter Model" }
+    },
+    "7": {
+        "inputs": {
+            "model": ["2", 0],
+            "ipadapter": ["6", 0],
+            "image": ["4", 0],
+            "weight": 0.6,
+            "weight_type": "style transfer",
+            "start_at": 0.0,
+            "end_at": 1.0,
+            "embeds_scaling": "V only",
+            "encode_batch_size": 0,
+            "clip_vision": ["5", 0]
+        },
+        "class_type": "IPAdapterBatch",
+        "_meta": { "title": "IPAdapter Batch" }
+    },
+    "8": {
+        "inputs": {
+            "text": "POSITIVE_PROMPT_PLACEHOLDER",
+            "clip": ["1", 0]
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": { "title": "CLIP Text Encode (Positive)" }
+    },
+    "9": {
+        "inputs": {
+            "text": "NEGATIVE_PROMPT_PLACEHOLDER",
+            "clip": ["1", 0]
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": { "title": "CLIP Text Encode (Negative)" }
+    },
+    "10": {
+        "inputs": {
+            "width": 1024,
+            "height": 1024,
+            "batch_size": 1
+        },
+        "class_type": "EmptyLatentImage",
+        "_meta": { "title": "Empty Latent Image" }
+    },
+    "11": {
+        "inputs": {
+            "seed": 42,
+            "steps": 20,
+            "cfg": 7.0,
+            "sampler_name": "dpmpp_2m",
+            "scheduler": "karras",
+            "denoise": 1.0,
+            "model": ["7", 0],
+            "positive": ["8", 0],
+            "negative": ["9", 0],
+            "latent_image": ["10", 0]
+        },
+        "class_type": "KSampler",
+        "_meta": { "title": "KSampler" }
+    },
+    "12": {
+        "inputs": {
+            "samples": ["11", 0],
+            "vae": ["3", 0]
+        },
+        "class_type": "VAEDecode",
+        "_meta": { "title": "VAE Decode" }
+    },
+    "13": {
+        "inputs": {
+            "filename_prefix": "ipadapter_output",
+            "images": ["12", 0]
+        },
+        "class_type": "SaveImage",
+        "_meta": { "title": "Save Image" }
+    }
+}
