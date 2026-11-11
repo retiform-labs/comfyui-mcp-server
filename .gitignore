@@ -72,3 +72,6 @@ Thumbs.db
 .serena/
 node_modules/
 package-lock.json
+
+# Local deployment audit artifacts (not part of the published package)
+audit/
