@@ -102,5 +102,13 @@ several tool contracts changed.
 - Tests that fail the build rather than the user: version single-sourcing,
   filesystem-path absoluteness, parameter-spec rejection, download contract,
   and VRAM release semantics.
+- Tests that run against the **real MCP SDK** rather than the pass-through
+  test double: an import in a subprocess, a live stdio handshake, and the tool
+  count a client actually receives. This is the instrument that catches a wrong
+  assumption about the dependency, which no mock can.
+- `.github/FUNDING.yml` and a Sponsors section in the README, carrying the
+  GitHub Sponsors link and the self-custody rails. Both travel inside the
+  wheel, since the dist-info metadata embeds the README, so the addresses reach
+  anyone reading the package from a registry.
 
 [2.0.0]: https://github.com/retiform-labs/comfyui-mcp-server/releases/tag/v2.0.0
