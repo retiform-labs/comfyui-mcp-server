@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "comfyui-mcp-server"
+name = "retiform-comfyui-mcp"
 dynamic = ["version"]
 description = "Agentic ComfyUI image generation over the Model Context Protocol: batch discovery, LoRA shaping, and provenance."
 readme = "README.md"

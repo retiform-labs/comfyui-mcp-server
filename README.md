@@ -280,8 +280,14 @@ A negative embedding is optional; the templates accept one via the
 ## Install
 
 ```bash
-pip install comfyui-mcp-server
+pip install retiform-comfyui-mcp
 ```
+
+> The **distribution** is `retiform-comfyui-mcp`; the installed **module** is
+> `comfyui_mcp_server` and the **console script** is `comfyui-mcp-server`. The
+> three names differ deliberately: PyPI rejects the bare `comfyui-mcp-server`
+> as too similar to two existing projects, and keeping the module path and the
+> script name stable means an install never breaks a working MCP client config.
 
 Or from source:
 

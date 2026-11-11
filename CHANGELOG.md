@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.0.0] - 2026-11-10
 
-First release under the `comfyui-mcp-server` name, rebuilt from an earlier
+First release under the `retiform-comfyui-mcp` distribution name, rebuilt from an earlier
 internal working repository that remains the historical record. This is a
 **major** bump because the package name, distribution name, module path and
 several tool contracts changed.
@@ -26,8 +26,12 @@ several tool contracts changed.
   arguments on `generate_ipadapter`, and the module defaults are overridable via
   `COMFYUI_CLIP_VISION_MODEL` and `COMFYUI_IPADAPTER_MODEL`. A different CLIP
   vision tower or adapter weight was previously a silent failure.
-- **Package renamed** from the internal working name to `comfyui-mcp-server`,
-  with the module at `comfyui_mcp_server` and a `src/` layout.
+- **Package renamed** from the internal working name to the `retiform-comfyui-mcp`
+  distribution, with the module at `comfyui_mcp_server` and a `src/` layout. The
+  distribution name and the module name intentionally differ: PyPI rejected
+  `comfyui-mcp-server` as too similar to two existing projects, and the module
+  path and the `comfyui-mcp-server` console script are kept stable so an install
+  change does not break a running configuration.
 - **Requires Python 3.11+**, raised from 3.10. This is forced by the Pillow pin
   below rather than chosen: Pillow 13 ships cp311 wheels and no 3.10 build. The
   cost is nil because 3.10 reached end-of-life on 2026-10-01, five weeks before

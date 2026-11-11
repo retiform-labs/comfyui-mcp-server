@@ -488,7 +488,7 @@ class TestVersionSingleSource(unittest.TestCase):
         import comfyui_mcp_server as pkg
 
         try:
-            installed = version("comfyui-mcp-server")
+            installed = version("retiform-comfyui-mcp")
         except PackageNotFoundError:
             self.skipTest("not installed; nothing to compare")
         self.assertEqual(pkg.__version__, installed, "dunder disagrees with installed metadata")
