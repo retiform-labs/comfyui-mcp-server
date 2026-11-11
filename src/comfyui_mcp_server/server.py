@@ -35,7 +35,7 @@ from mcp.server.fastmcp import FastMCP
 # survivable -- a silently-None logger degrades every tool's diagnostics
 # without a word -- so it raises instead of warning.
 from .logger import log_debug, log_error, log_info, log_warning
-from .png_metadata import embed_metadata
+from .png_metadata import META_INFO_KEY, embed_metadata
 
 # Persistent job params cache (survives process restarts via file backing)
 _JOB_PARAMS_CACHE_PATH = os.path.join(os.path.dirname(__file__), ".job_params_cache.json")
@@ -275,10 +275,16 @@ mcp._mcp_server.version = _PKG_VERSION
 # ============================================================================
 # TOOL 1: system_check
 # ============================================================================
-# IP-Adapter model constants (SDXL vit-h variants)
-IPADAPTER_CLIP_VISION_MODEL = "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
-IPADAPTER_PLUS_MODEL = "ip-adapter-plus_sdxl_vit-h.bin"
-IPADAPTER_BASIC_MODEL = "ip-adapter_sdxl_vit-h.bin"
+# IP-Adapter loader defaults. These are DEFAULTS, not facts about any install:
+# a different CLIP vision tower or IP-Adapter weight is a legitimate setup, so
+# every one of them is overridable per call in generate_ipadapter() and, failing
+# that, by environment variable. A hardcoded model name here silently pins every
+# user to one specific download.
+IPADAPTER_CLIP_VISION_MODEL = os.environ.get(
+    "COMFYUI_CLIP_VISION_MODEL", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+)
+IPADAPTER_PLUS_MODEL = os.environ.get("COMFYUI_IPADAPTER_MODEL", "ip-adapter-plus_sdxl_vit-h.bin")
+IPADAPTER_BASIC_MODEL = os.environ.get("COMFYUI_IPADAPTER_BASIC_MODEL", "ip-adapter_sdxl_vit-h.bin")
 
 
 @mcp.tool()
@@ -444,7 +450,7 @@ def get_comfyui_status() -> dict[str, Any]:
 
 
 # ============================================================================
-# TOOL 5: generate_logo - FIXED VERSION
+# TOOL 5: generate_image - text-to-image
 # ============================================================================
 def _generator_tag(variant: str = "") -> str:
     """Provenance string stamped into generated images.
@@ -882,12 +888,21 @@ def _inject_ipadapter_nodes(
     end_at: float = 1.0,
     embeds_scaling: str = "V only",
     encode_batch_size: int = 0,
+    clip_vision_model: str | None = None,
+    ipadapter_model: str | None = None,
 ) -> dict:
     """Inject IP-Adapter nodes for multi-image reference generation.
 
     For 1 reference image: direct LoadImage -> IPAdapterBatch
     For 2+ references: LoadImages -> ImageBatch chain -> IPAdapterBatch
+
+    ``clip_vision_model`` and ``ipadapter_model`` name the weights the two
+    loader nodes should use. They default to the module constants, which are
+    themselves environment-overridable, so nothing here assumes a particular
+    install's model filenames.
     """
+    clip_vision_model = clip_vision_model or IPADAPTER_CLIP_VISION_MODEL
+    ipadapter_model = ipadapter_model or IPADAPTER_PLUS_MODEL
     if not ref_images:
         return workflow
     if len(ref_images) > 4:
@@ -974,7 +989,7 @@ def _inject_ipadapter_nodes(
     offset = len(load_image_ids) + max(0, len(ref_images) - 1)
     clipvision_id = str(next_id + offset)
     workflow[clipvision_id] = {
-        "inputs": {"clip_name": IPADAPTER_CLIP_VISION_MODEL},
+        "inputs": {"clip_name": clip_vision_model},
         "class_type": "CLIPVisionLoader",
         "_meta": {"title": "Load CLIP Vision (IP-Adapter)"},
     }
@@ -982,7 +997,7 @@ def _inject_ipadapter_nodes(
     # IPAdapterModelLoader
     ipadapter_loader_id = str(int(clipvision_id) + 1)
     workflow[ipadapter_loader_id] = {
-        "inputs": {"ipadapter_file": IPADAPTER_PLUS_MODEL},
+        "inputs": {"ipadapter_file": ipadapter_model},
         "class_type": "IPAdapterModelLoader",
         "_meta": {"title": "Load IPAdapter Model"},
     }
@@ -1034,7 +1049,7 @@ def _get_available_loras() -> list[str]:
 
 
 @mcp.tool()
-def generate_logo(
+def generate_image(
     prompt: str,
     negative_embedding: str | None = None,
     negative_prompt: str = "text, watermark, blurry, low quality",
@@ -1050,9 +1065,33 @@ def generate_logo(
     seed: int | None = None,
     output_format: str = "png",
 ) -> dict[str, Any]:
-    """Submit async logo generation job"""
+    """Submit an async text-to-image generation job.
+
+    Runs the packaged SDXL workflow: loads the diffusion model, encodes the
+    prompt pair, samples, and decodes. Returns immediately with a job id --
+    poll ``get_job_status`` for the result.
+
+    Args:
+        prompt: What to generate.
+        negative_embedding: Textual-inversion embedding appended to the negative prompt.
+        negative_prompt: What to avoid.
+        width: Output width in pixels.
+        height: Output height in pixels.
+        steps: Sampling steps. More is slower and usually better.
+        cfg_scale: Classifier-free guidance. Higher follows the prompt harder.
+        sampler: Sampler name, as ComfyUI exposes it.
+        scheduler: Scheduler name, as ComfyUI exposes it.
+        lora: Single LoRA filename from comfyui/models/loras/.
+        lora_weight: Weight for ``lora``.
+        loras: Several LoRAs at once, as ``[{"name": ..., "weight": ...}]``.
+        seed: Fixed seed for reproducibility. Omitted means a random one.
+        output_format: ``png`` keeps provenance metadata; other values do not.
+
+    Returns:
+        A job record with ``job_id``, the resolved parameters, and the workflow path.
+    """
     # Entry-point parameters, logged at DEBUG so a normal run stays quiet.
-    log_debug("[MCP-DEBUG] === generate_logo called ===")
+    log_debug("[MCP-DEBUG] === generate_image called ===")
     log_debug(f"[MCP-DEBUG] prompt: {repr(prompt[:60])}...")
     log_debug(f"[MCP-DEBUG] negative_prompt: {repr(negative_prompt[:60])}...")
     log_debug(f"[MCP-DEBUG] sampler: {repr(sampler)}, scheduler: {repr(scheduler)}")
@@ -1080,7 +1119,7 @@ def generate_logo(
             }
 
         # Load workflow template (resolved relative to this package, never absolute)
-        workflow_path = _workflow_path("gguf_logo_template_api.json")
+        workflow_path = _workflow_path("sdxl_gguf_template_api.json")
         with open(workflow_path) as f:
             workflow = json.load(f)
 
@@ -1131,7 +1170,7 @@ def generate_logo(
                 node["inputs"]["height"] = height
 
         # Build metadata payload for native PNG embedding alongside generation
-        logo_gen_info = {
+        generation_info = {
             "positive_prompt": prompt,
             "negative_prompt": negative_prompt,
             "negative_embedding": negative_embedding,
@@ -1149,12 +1188,12 @@ def generate_logo(
         }
 
         # Persist debug trace
-        _trace_workflow(workflow, "generate_logo")
+        _trace_workflow(workflow, "generate_image")
 
         # Submit to ComfyUI — extra_pnginfo lands in PNG via native SaveImage node
         response = requests.post(
             f"{COMFYUI_URL}/prompt",
-            json={"prompt": workflow, "extra_data": {"extra_pnginfo": {"LogoGenInfo": logo_gen_info}}},
+            json={"prompt": workflow, "extra_data": {"extra_pnginfo": {META_INFO_KEY: generation_info}}},
             timeout=30,
         )
 
@@ -1259,6 +1298,8 @@ def generate_ipadapter(
     loras: list[dict[str, str | float]] | None = None,
     output_format: str = "png",
     output_prefix: str = "ipadapter",
+    clip_vision_model: str | None = None,
+    ipadapter_model: str | None = None,
 ) -> dict[str, Any]:
     """Generate image with IP-Adapter multi-reference style blending.
 
@@ -1317,7 +1358,7 @@ def generate_ipadapter(
                 return {"error": f"Reference image not found in input/: {img_name}", "job_id": None, "status": "failed"}
 
         # Load workflow template (resolved relative to this package, never absolute)
-        wf_path = _workflow_path("ipadapter_logo_template_api.json")
+        wf_path = _workflow_path("sdxl_ipadapter_template_api.json")
         with open(wf_path) as f:
             template = json.load(f)
         workflow = copy.deepcopy(template)
@@ -1352,6 +1393,8 @@ def generate_ipadapter(
             start_at=start_at,
             end_at=end_at,
             embeds_scaling=embeds_scaling,
+            clip_vision_model=clip_vision_model,
+            ipadapter_model=ipadapter_model,
         )
 
         # Seed
@@ -1394,7 +1437,7 @@ def generate_ipadapter(
                 ksampler_node = node
                 break
 
-        logo_gen_info = {
+        generation_info = {
             "positive_prompt": prompt,
             "negative_prompt": negative_prompt,
             "negative_embedding": negative_embedding,
@@ -1422,7 +1465,7 @@ def generate_ipadapter(
         # Submit to ComfyUI with extra_pnginfo
         res = requests.post(
             f"{COMFYUI_URL}/prompt",
-            json={"prompt": workflow, "extra_data": {"extra_pnginfo": {"LogoGenInfo": logo_gen_info}}},
+            json={"prompt": workflow, "extra_data": {"extra_pnginfo": {META_INFO_KEY: generation_info}}},
             timeout=30,
         )
         data = res.json()
@@ -1819,7 +1862,7 @@ def batch_generate(
 
             # Submit generation with resolved concrete values
             log_debug(f"[MCP-BATCH-TRACE] Submitting prompt {i + 1}/{len(prompts)}: {prompt[:40]}...")
-            result = generate_logo(
+            result = generate_image(
                 prompt=prompt,
                 negative_prompt=resolved.get("negative_prompt", "text, watermark, blurry"),
                 negative_embedding=resolved.get("negative_embedding"),

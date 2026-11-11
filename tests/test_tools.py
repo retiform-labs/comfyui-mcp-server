@@ -34,9 +34,9 @@ class TestWorkflowPath(unittest.TestCase):
     """Templates resolve relative to the package, never to an absolute path."""
 
     TEMPLATES = [
-        "gguf_logo_template_api.json",
-        "gguf_logo_template_lora_api.json",
-        "ipadapter_logo_template_api.json",
+        "sdxl_gguf_template_api.json",
+        "sdxl_gguf_lora_template_api.json",
+        "sdxl_ipadapter_template_api.json",
     ]
 
     def test_every_template_exists(self):
@@ -46,7 +46,7 @@ class TestWorkflowPath(unittest.TestCase):
                 self.assertTrue(os.path.isfile(path), f"missing {name} at {path}")
 
     def test_resolved_inside_package(self):
-        path = srv._workflow_path("gguf_logo_template_api.json")
+        path = srv._workflow_path("sdxl_gguf_template_api.json")
         pkg_dir = os.path.dirname(os.path.abspath(srv.__file__))
         self.assertTrue(path.startswith(pkg_dir), f"{path} escaped {pkg_dir}")
 
@@ -251,7 +251,7 @@ class TestProvenance(unittest.TestCase):
     def test_full_params_roundtrip(self):
         text = build_a1111_text(
             {
-                "positive_prompt": "a logo",
+                "positive_prompt": "a geometric mark",
                 "negative_prompt": "blurry",
                 "steps": 30,
                 "sampler": "dpmpp_2m",
@@ -272,6 +272,66 @@ class TestProvenance(unittest.TestCase):
         self.assertIn("Seed: 0", text)
 
 
+class TestConfigurableLoaders(unittest.TestCase):
+    """The IP-Adapter loaders must not assume one install's model filenames.
+
+    Both node names are legitimately user-chosen. A hardcoded value here pins
+    every user to one download and fails silently on any other.
+    """
+
+    def _inject(self, **kwargs):
+        wf = {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "x"}},
+            "8": {"inputs": {"text": "POSITIVE_PROMPT_PLACEHOLDER"}, "class_type": "CLIPTextEncode",
+                  "_meta": {"title": "CLIP Text Encode (Positive)"}},
+            "9": {"inputs": {"text": "NEGATIVE_PROMPT_PLACEHOLDER"}, "class_type": "CLIPTextEncode",
+                  "_meta": {"title": "CLIP Text Encode (Negative)"}},
+        }
+        with patch("os.path.isfile", return_value=True):
+            return srv._inject_ipadapter_nodes(wf, ["ref.png"], **kwargs)
+
+    def test_custom_models_are_used(self):
+        wf = self._inject(
+            clip_vision_model="my-clip-vision.safetensors",
+            ipadapter_model="my-ipadapter.bin",
+        )
+        clip = [n for n in wf.values() if n.get("class_type") == "CLIPVisionLoader"]
+        ipa = [n for n in wf.values() if n.get("class_type") == "IPAdapterModelLoader"]
+        self.assertEqual(clip[0]["inputs"]["clip_name"], "my-clip-vision.safetensors")
+        self.assertEqual(ipa[0]["inputs"]["ipadapter_file"], "my-ipadapter.bin")
+
+    def test_defaults_apply_when_unset(self):
+        wf = self._inject()
+        clip = [n for n in wf.values() if n.get("class_type") == "CLIPVisionLoader"]
+        self.assertEqual(clip[0]["inputs"]["clip_name"], srv.IPADAPTER_CLIP_VISION_MODEL)
+
+    def test_constants_are_env_overridable(self):
+        """The module defaults themselves must come from the environment."""
+        import importlib
+        import os as _os
+
+        with patch.dict(_os.environ, {"COMFYUI_CLIP_VISION_MODEL": "env-clip.safetensors"}):
+            reloaded = importlib.reload(srv)
+            self.assertEqual(reloaded.IPADAPTER_CLIP_VISION_MODEL, "env-clip.safetensors")
+        importlib.reload(srv)
+
+
+class TestProvenanceKey(unittest.TestCase):
+    """New images use the current key; images from before the rename still read."""
+
+    def test_current_key(self):
+        from comfyui_mcp_server.png_metadata import META_INFO_KEY
+
+        self.assertEqual(META_INFO_KEY, "GenerationInfo")
+        # server.py must use the same constant, not a literal of its own.
+        self.assertEqual(srv.META_INFO_KEY, META_INFO_KEY)
+
+    def test_legacy_key_still_read(self):
+        from comfyui_mcp_server.png_metadata import META_INFO_KEY_LEGACY
+
+        self.assertEqual(META_INFO_KEY_LEGACY, "LogoGenInfo")
+
+
 class TestToolRegistry(unittest.TestCase):
     """All 13 tools must be registered -- no silent surface loss."""
 
@@ -280,7 +340,7 @@ class TestToolRegistry(unittest.TestCase):
         "start_comfyui",
         "stop_comfyui",
         "get_comfyui_status",
-        "generate_logo",
+        "generate_image",
         "get_job_status",
         "generate_ipadapter",
         "batch_generate_ipadapter",
@@ -383,7 +443,7 @@ class TestBatchVramRelease(unittest.TestCase):
                 self.assertFalse(sig.parameters["keep_loaded"].default)
 
     @patch.object(srv, "_release_after_batch", return_value=None)
-    @patch.object(srv, "generate_logo", return_value={"job_id": "j1"})
+    @patch.object(srv, "generate_image", return_value={"job_id": "j1"})
     def test_batch_reports_release_fields(self, _gen, mock_release):
         out = srv.batch_generate(prompts=["a", "b"], keep_loaded=True)
         self.assertEqual(out["queued_jobs"], 2)

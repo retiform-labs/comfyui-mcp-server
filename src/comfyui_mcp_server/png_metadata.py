@@ -29,7 +29,12 @@ META_LORAS = "loras"
 META_TIMESTAMP = "timestamp"
 META_GENERATOR = "generator"
 
-META_INFO_KEY = "LogoGenInfo"
+# Structured provenance key. Renamed from "LogoGenInfo" when the tool surface
+# became generic; the old key is still READ so images rendered before the rename
+# stay inspectable. New images are written with the current key only -- writing
+# both would embed the same payload twice.
+META_INFO_KEY = "GenerationInfo"
+META_INFO_KEY_LEGACY = "LogoGenInfo"
 try:
     from . import __version__ as _PKG_VERSION
 except ImportError:  # executed as a flat script
@@ -49,7 +54,7 @@ def _sanitize_for_tex(text: str) -> str:
 def build_a1111_text(params: dict[str, Any]) -> str:
     """Build A1111-style parameters text block from a params dict.
 
-    Accepts both LogoGenInfo-style keys (positive_prompt, negative_prompt, cfg_scale)
+    Accepts both structured-info-style keys (positive_prompt, negative_prompt, cfg_scale)
     and legacy short keys (positive, negative, cfg).
     """
     positive = params.get("positive_prompt", params.get("positive", ""))
@@ -162,18 +167,19 @@ def extract_metadata(filepath: str) -> dict[str, Any]:
         "filepath": filepath,
         "filename": os.path.basename(filepath),
         "has_parameters": META_PARAMETERS in metadata,
-        "has_structured": META_INFO_KEY in metadata,
+        "has_structured": META_INFO_KEY in metadata or META_INFO_KEY_LEGACY in metadata,
         "parameters_text": metadata.get(META_PARAMETERS, ""),
         "structured": {},
         "rawkeys": list(metadata.keys()),
     }
 
-    if META_INFO_KEY in metadata:
+    structured_key = META_INFO_KEY if META_INFO_KEY in metadata else META_INFO_KEY_LEGACY
+    if structured_key in metadata:
         try:
-            result["structured"] = json.loads(metadata[META_INFO_KEY])
+            result["structured"] = json.loads(metadata[structured_key])
         except json.JSONDecodeError:
             log_warning(f"Invalid structured metadata in {filepath}", tool_name="png_metadata")
-            result["structured"] = {"raw": metadata[META_INFO_KEY]}
+            result["structured"] = {"raw": metadata[structured_key]}
 
     # Also try to parse A1111 parameters text into structured form
     if META_PARAMETERS in metadata and not result["structured"]:
@@ -189,7 +195,7 @@ def extract_metadata(filepath: str) -> dict[str, Any]:
     return result
 
 
-def annotate_outputs(output_dir: str, params: dict[str, Any], pattern: str = "logo_output*") -> list[str]:
+def annotate_outputs(output_dir: str, params: dict[str, Any], pattern: str = "image_output*") -> list[str]:
     """Find matching PNGs in a directory and embed metadata in each."""
     import fnmatch
 

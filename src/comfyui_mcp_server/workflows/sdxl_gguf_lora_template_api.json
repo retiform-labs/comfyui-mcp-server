@@ -73,7 +73,7 @@
   },
   "9": {
     "inputs": {
-      "filename_prefix": "logo_output",
+      "filename_prefix": "image_output",
       "images": ["8", 0]
     },
     "class_type": "SaveImage",
